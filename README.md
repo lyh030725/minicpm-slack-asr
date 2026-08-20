@@ -48,12 +48,12 @@ final ASR text
 
 ## Dataset
 
-The default experiment uses **every LibriSpeech ASR `test-clean` utterance whose duration is strictly greater than 10 seconds**.
+The default experiment uses **every LibriSpeech ASR `test-clean` utterance whose duration is greater than or equal to 10 seconds**.
 
 There is no sample cap in the default run:
 
 ```text
-min_duration > 10.0 s
+min_duration >= 10.0 s
 max_samples = 0   # all qualifying utterances
 ```
 
@@ -132,7 +132,7 @@ The first-pass generation also has a semantic cap of 12 new text tokens per audi
 --max-draft-tokens-per-chunk N
 ```
 
-The complete tentative transcript is used as the second-pass draft. Up to 256 of its most recent tokens are re-prefilled as the assistant prefix during each intermediate branch; for typical LibriSpeech >10 s utterances this generally covers the whole draft.
+The complete tentative transcript is used as the second-pass draft. Up to 256 of its most recent tokens are re-prefilled as the assistant prefix during each intermediate branch; for typical LibriSpeech >=10 s utterances this generally covers the whole draft.
 
 ## RunPod environment
 
@@ -167,10 +167,10 @@ bash scripts/download_librispeech.sh
 This also creates:
 
 ```text
-data/manifests/test-clean-gt10.csv
+data/manifests/test-clean-ge10.csv
 ```
 
-containing every utterance with duration strictly greater than 10 seconds.
+containing every utterance with duration greater than or equal to 10 seconds.
 
 ### 3. Run the complete experiment
 
@@ -187,17 +187,17 @@ python -m minicpm_slack_asr.run \
   --max-samples 0 \
   --conditions baseline slack_2pass \
   --realtime \
-  --output-dir results/test-clean-gt10
+  --output-dir results/test-clean-ge10
 ```
 
-`--max-samples 0` is important: it means **all** qualifying >10-second samples.
+`--max-samples 0` is important: it means **all** qualifying >=10-second samples.
 
 For a quick code check before the full run, you can temporarily use e.g. `--max-samples 2 --no-realtime`. Do not use that for the final reported experiment.
 
 ## Outputs
 
 ```text
-results/test-clean-gt10/
+results/test-clean-ge10/
 ├── manifest.csv
 ├── samples.csv
 ├── chunks.csv
@@ -254,7 +254,7 @@ A positive `relative_wer_reduction_pct` means the slack-assisted two-pass condit
 
 ## Resume behavior
 
-The full >10-second set can take a while. `--resume` is enabled by default. If `samples.csv` already contains a completed `(sample_id, condition)`, that condition is skipped on the next invocation.
+The full >=10-second set can take a while. `--resume` is enabled by default. If `samples.csv` already contains a completed `(sample_id, condition)`, that condition is skipped on the next invocation.
 
 Disable this with:
 
