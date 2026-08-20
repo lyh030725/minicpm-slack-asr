@@ -102,7 +102,10 @@ def _collect_environment(args: argparse.Namespace, runner: MiniCPMSlackASR) -> d
         "target_runpod_image": "runpod/pytorch:1.0.7-cu1290-torch291-ubuntu2404",
         "args": {},
         "model_settings": runner.model_settings(),
-        "speech_generation": "disabled: init_tts=False; project calls model.llm only for decoding",
+        "speech_generation": (
+            "disabled: init_tts=False; slack uses LLM text decoding and final uses "
+            "streaming_generate(generate_audio=False, use_tts_template=True)"
+        ),
     }
     for key, value in vars(args).items():
         if isinstance(value, Path):
@@ -405,7 +408,10 @@ def main() -> None:
         print(f"[data] selected={len(samples)} test-clean utterances with duration>={args.min_duration}s")
     print(f"[data] max_samples={args.max_samples} (0 means all)")
     print(f"[run] conditions={args.conditions} realtime={args.realtime}")
-    print("[model] speech decoding disabled: init_tts=False, LLM text tokens only")
+    print(
+        "[model] speech decoding disabled: init_tts=False, final generate_audio=False; "
+        "LLM uses MiniCPM-o TTS-template response prefix <|tts_bos|>"
+    )
 
     runner = MiniCPMSlackASR(
         ModelConfig(
