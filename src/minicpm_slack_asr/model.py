@@ -37,12 +37,7 @@ SLACK_FINAL_PROMPT_TEMPLATE = (
 
 
 def build_final_prompt(draft_text: str | None) -> str:
-    """Build a compact final-ASR instruction with the draft clearly delimited.
-
-    The previous verbose prompt could occasionally be echoed as assistant output. Keeping
-    the instruction short and isolating the fallible draft reduces that copy/continuation
-    failure mode while preserving the same information available to the final decoder.
-    """
+    """Build a compact final-ASR instruction with the draft clearly delimited."""
     if draft_text is None:
         return BASELINE_FINAL_PROMPT
     return SLACK_FINAL_PROMPT_TEMPLATE.format(draft=draft_text.strip())
@@ -76,13 +71,7 @@ def build_non_thinking_assistant_prefix(model: Any) -> str:
 
 
 def resolve_thinking_token_ids(tokenizer: Any) -> dict[str, int]:
-    """Resolve Qwen3 thinking markers to single token IDs for hard masking.
-
-    Qwen3 exposes <think> and </think> as dedicated tokens. Requiring each marker
-    to map to exactly one token makes the mask explicit and fail-closed: if a future
-    tokenizer revision changes that assumption, the experiment stops instead of
-    silently allowing reasoning text back into ASR output.
-    """
+    """Resolve Qwen3 thinking markers to single token IDs for hard masking."""
     result: dict[str, int] = {}
     for marker in ("<think>", "</think>"):
         ids = tokenizer.encode(marker, add_special_tokens=False)
@@ -188,8 +177,6 @@ class MiniCPMSlackASR:
 
     def _decode_text_checked(self, token_ids: list[int], *, phase: str) -> str:
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
-        # Decoder-level masking should make these markers impossible. Keep this check as
-        # a final fail-closed guard against tokenizer/model revision drift.
         if "<think>" in text or "</think>" in text:
             raise RuntimeError(
                 f"Qwen3 thinking content escaped the decoder-level mask during {phase}. "
@@ -211,8 +198,6 @@ class MiniCPMSlackASR:
             enable_thinking=False,
             is_last_chunk=False,
         )
-        # Start one user turn with the ASR task prompt; all following audio chunks are
-        # appended to this same turn.
         self.model.streaming_prefill(
             session_id=session_id,
             msgs=[{"role": "user", "content": [STREAMING_ASR_PROMPT]}],
@@ -242,33 +227,33 @@ class MiniCPMSlackASR:
         torch.cuda.synchronize()
         return (time.perf_counter() - start) * 1000.0
 
-    def _prefill_streaming_text(self, text: str) -> float:
-        """Append final text through MiniCPM-o's own streaming prefill path.
+    def _prefill_raw_text(self, text: str) -> float:
+        """Append final instruction/draft directly to the current full-audio LLM KV.
 
-        This keeps the model's streaming/chat state and position handling aligned with the
-        audio-prefill path instead of mutating only the Qwen3 KV cache with a raw LLM call.
+        The audio and task prompt are already in one streaming user turn. Re-entering
+        streaming_prefill for a final text-only segment can alter MiniCPM-o's streaming
+        state and, for instruction-only baseline prompts, make the first decoded token an
+        immediate terminator. A direct LLM prefill preserves the existing full-audio KV
+        exactly and appends only the intended final instruction/draft tokens.
         """
-        if self.session_id is None:
-            raise RuntimeError("reset_for_sample() must be called first.")
-        if not text:
+        ids = self.tokenizer.encode(text, add_special_tokens=False)
+        if not ids:
             return 0.0
+        input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
         torch.cuda.synchronize()
         start = time.perf_counter()
-        self.model.streaming_prefill(
-            session_id=self.session_id,
-            msgs=[{"role": "user", "content": [text]}],
-            omni_mode=False,
-            use_tts_template=False,
-            enable_thinking=False,
-            is_last_chunk=False,
-        )
+        with torch.inference_mode():
+            out = self.model.llm(
+                input_ids=input_ids,
+                past_key_values=self.model.llm_past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+        self.model.llm_past_key_values = out.past_key_values
         torch.cuda.synchronize()
         return (time.perf_counter() - start) * 1000.0
 
     def _argmax_token(self, logits: torch.Tensor) -> int:
-        # Prefix steering alone is not a hard constraint: Qwen3 can occasionally
-        # re-enter reasoning and emit <think>. Mask both dedicated marker token IDs
-        # before argmax so neither slack drafts nor final ASR can enter thinking mode.
         masked_logits = logits.clone()
         forbidden_ids = sorted(self._forbidden_generation_token_ids)
         masked_logits[..., forbidden_ids] = float("-inf")
@@ -310,7 +295,6 @@ class MiniCPMSlackASR:
         logits = out.logits[:, -1, :]
         decode_start = time.perf_counter()
 
-        # The first output token is available from the prefix forward pass.
         next_id = self._argmax_token(logits)
         if next_id not in self._terminator_ids and max_new_tokens > 0:
             generated.append(next_id)
@@ -383,8 +367,6 @@ class MiniCPMSlackASR:
                 deadline_s=deadline_s,
             )
         finally:
-            # Draft text is an external tentative state. Never let it contaminate the
-            # audio-stream KV cache consumed by the next chunk.
             self.model._truncate_llm_cache(cache_len_before)
             torch.cuda.synchronize()
 
@@ -410,7 +392,7 @@ class MiniCPMSlackASR:
 
     def finalize(self, *, draft_text: str | None) -> tuple[str, float, float]:
         final_prompt = build_final_prompt(draft_text)
-        final_prompt_ms = self._prefill_streaming_text(final_prompt)
+        final_prompt_ms = self._prefill_raw_text(final_prompt)
         generated_ids, prefix_ms, decode_ms = self._decode_with_prefix(
             self._assistant_prefix_ids,
             max_new_tokens=self.config.max_final_tokens,
@@ -433,7 +415,7 @@ class MiniCPMSlackASR:
             "assistant_prefix_source": "matches upstream streaming_generate(enable_thinking=False, use_tts_template=False)",
             "thinking_token_mask": dict(self._thinking_token_ids),
             "thinking_token_mask_scope": "slack draft and final ASR decoding",
-            "final_prompt_prefill": "MiniCPM-o streaming_prefill, text-only, same user turn",
+            "final_prompt_prefill": "direct model.llm append to current full-audio KV",
             "system_prompt": SYSTEM_PROMPT,
             "streaming_asr_prompt": STREAMING_ASR_PROMPT,
             "baseline_final_prompt": BASELINE_FINAL_PROMPT,
