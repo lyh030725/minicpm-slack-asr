@@ -44,15 +44,16 @@ def _load_librispeech_transcripts(root: Path) -> dict[str, str]:
 
 def discover_librispeech(
     root: Path,
-    min_duration_s: float = 10.0,
+    min_duration_s: float = 0.0,
     max_samples: int = 0,
     shuffle: bool = False,
     seed: int = 42,
 ) -> list[AudioSample]:
-    """Discover LibriSpeech FLAC files with duration greater than or equal to min_duration_s.
+    """Discover LibriSpeech FLAC files with duration >= ``min_duration_s``.
 
-    ``max_samples=0`` means all qualifying utterances. References are read from the
-    standard ``*.trans.txt`` files shipped with LibriSpeech.
+    The default ``min_duration_s=0`` selects the complete split. ``max_samples=0``
+    means all qualifying utterances. References are read from the standard
+    ``*.trans.txt`` files shipped with LibriSpeech.
     """
     root = Path(root)
     if not root.exists():
