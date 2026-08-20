@@ -157,6 +157,7 @@ def _run_condition(
     *,
     realtime: bool,
     chunk_writer: csv.DictWriter,
+    compare_finalizers: bool = False,
 ) -> dict[str, Any]:
     if condition not in CONDITIONS:
         raise ValueError(condition)
@@ -250,9 +251,17 @@ def _run_condition(
         )
 
     first_pass_draft = runner.tokenizer.decode(draft_ids, skip_special_tokens=True).strip()
-    final_text, final_prefix_ms, final_decode_ms = runner.finalize(
-        draft_text=first_pass_draft if condition == "slack_2pass" else None
-    )
+    final_draft = first_pass_draft if condition == "slack_2pass" else None
+    finalizer_comparison: dict[str, Any] | None = None
+    if compare_finalizers:
+        finalizer_comparison = runner.compare_finalizers(draft_text=final_draft)
+        custom = finalizer_comparison["custom"]
+        final_text = str(custom.get("text") or "")
+        final_prefix_ms = float(custom.get("prompt_prefix_ms") or 0.0)
+        final_decode_ms = float(custom.get("decode_ms") or 0.0)
+    else:
+        final_text, final_prefix_ms, final_decode_ms = runner.finalize(draft_text=final_draft)
+
     counts = compute_wer(sample.reference, final_text)
     first_pass_counts = compute_wer(sample.reference, first_pass_draft) if condition == "slack_2pass" else None
 
@@ -272,6 +281,8 @@ def _run_condition(
         "deadline_miss_chunks": deadline_miss_chunks,
         "draft_tokens": len(draft_ids),
     }
+    if finalizer_comparison is not None:
+        row["_finalizer_comparison"] = finalizer_comparison
     return row
 
 
