@@ -23,16 +23,29 @@ STREAMING_ASR_PROMPT = (
     "entire utterance and output only one corrected final transcript."
 )
 BASELINE_FINAL_PROMPT = (
-    "\nThe audio is complete. Review the entire utterance and output only the spoken words as the "
-    "final verbatim transcript. Do not include reasoning, explanations, labels, or preambles."
+    "\n<FINAL_ASR>\n"
+    "Use the full audio above as the source of truth. Output only its verbatim transcript.\n"
+    "</FINAL_ASR>"
 )
 SLACK_FINAL_PROMPT_TEMPLATE = (
-    "\nThe audio is complete. The following is a tentative first-pass transcript produced during "
-    "listening and it may contain recognition errors, omissions, or formatting artifacts:\n{draft}\n"
-    "Re-check the full audio, correct any misheard or missing words, ignore any non-speech formatting "
-    "in the draft, and output only the spoken words as the final verbatim transcript. Do not include "
-    "reasoning, explanations, labels, or preambles."
+    "\n<DRAFT>\n{draft}\n</DRAFT>\n"
+    "<FINAL_ASR>\n"
+    "Use the full audio above as the source of truth. Correct the draft only where needed and "
+    "output only the verbatim transcript.\n"
+    "</FINAL_ASR>"
 )
+
+
+def build_final_prompt(draft_text: str | None) -> str:
+    """Build a compact final-ASR instruction with the draft clearly delimited.
+
+    The previous verbose prompt could occasionally be echoed as assistant output. Keeping
+    the instruction short and isolating the fallible draft reduces that copy/continuation
+    failure mode while preserving the same information available to the final decoder.
+    """
+    if draft_text is None:
+        return BASELINE_FINAL_PROMPT
+    return SLACK_FINAL_PROMPT_TEMPLATE.format(draft=draft_text.strip())
 
 
 def build_non_thinking_assistant_prefix(model: Any) -> str:
@@ -229,22 +242,26 @@ class MiniCPMSlackASR:
         torch.cuda.synchronize()
         return (time.perf_counter() - start) * 1000.0
 
-    def _prefill_raw_text(self, text: str) -> float:
-        """Append plain text to the current user turn without invoking audio/TTS code."""
-        ids = self.tokenizer.encode(text, add_special_tokens=False)
-        if not ids:
+    def _prefill_streaming_text(self, text: str) -> float:
+        """Append final text through MiniCPM-o's own streaming prefill path.
+
+        This keeps the model's streaming/chat state and position handling aligned with the
+        audio-prefill path instead of mutating only the Qwen3 KV cache with a raw LLM call.
+        """
+        if self.session_id is None:
+            raise RuntimeError("reset_for_sample() must be called first.")
+        if not text:
             return 0.0
-        input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
         torch.cuda.synchronize()
         start = time.perf_counter()
-        with torch.inference_mode():
-            out = self.model.llm(
-                input_ids=input_ids,
-                past_key_values=self.model.llm_past_key_values,
-                use_cache=True,
-                return_dict=True,
-            )
-        self.model.llm_past_key_values = out.past_key_values
+        self.model.streaming_prefill(
+            session_id=self.session_id,
+            msgs=[{"role": "user", "content": [text]}],
+            omni_mode=False,
+            use_tts_template=False,
+            enable_thinking=False,
+            is_last_chunk=False,
+        )
         torch.cuda.synchronize()
         return (time.perf_counter() - start) * 1000.0
 
@@ -392,12 +409,8 @@ class MiniCPMSlackASR:
         )
 
     def finalize(self, *, draft_text: str | None) -> tuple[str, float, float]:
-        if draft_text is None:
-            final_prompt = BASELINE_FINAL_PROMPT
-        else:
-            final_prompt = SLACK_FINAL_PROMPT_TEMPLATE.format(draft=draft_text.strip())
-
-        final_prompt_ms = self._prefill_raw_text(final_prompt)
+        final_prompt = build_final_prompt(draft_text)
+        final_prompt_ms = self._prefill_streaming_text(final_prompt)
         generated_ids, prefix_ms, decode_ms = self._decode_with_prefix(
             self._assistant_prefix_ids,
             max_new_tokens=self.config.max_final_tokens,
@@ -420,6 +433,7 @@ class MiniCPMSlackASR:
             "assistant_prefix_source": "matches upstream streaming_generate(enable_thinking=False, use_tts_template=False)",
             "thinking_token_mask": dict(self._thinking_token_ids),
             "thinking_token_mask_scope": "slack draft and final ASR decoding",
+            "final_prompt_prefill": "MiniCPM-o streaming_prefill, text-only, same user turn",
             "system_prompt": SYSTEM_PROMPT,
             "streaming_asr_prompt": STREAMING_ASR_PROMPT,
             "baseline_final_prompt": BASELINE_FINAL_PROMPT,
