@@ -1,4 +1,7 @@
+import torch
+
 from minicpm_slack_asr.model import (
+    MiniCPMSlackASR,
     build_non_thinking_assistant_prefix,
     resolve_thinking_token_ids,
 )
@@ -29,3 +32,12 @@ def test_thinking_markers_resolve_to_dedicated_token_ids():
         "<think>": 101,
         "</think>": 102,
     }
+
+
+def test_argmax_hard_masks_thinking_token_ids():
+    runner = object.__new__(MiniCPMSlackASR)
+    runner._forbidden_generation_token_ids = {1, 3}
+
+    # Thinking tokens have the largest raw logits, but token 2 must win after masking.
+    logits = torch.tensor([[0.1, 100.0, 2.0, 99.0]], dtype=torch.float32)
+    assert runner._argmax_token(logits) == 2
