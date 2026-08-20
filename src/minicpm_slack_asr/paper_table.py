@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -112,3 +114,20 @@ def write_paper_tables(summary: dict[str, Any], output_dir: Path) -> tuple[Path,
     md_path.write_text(build_markdown_table(summary), encoding="utf-8")
     tex_path.write_text(build_latex_table(summary), encoding="utf-8")
     return md_path, tex_path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Create paper-style ASR result tables from summary.json.")
+    parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+
+    with args.summary.open("r", encoding="utf-8") as f:
+        summary = json.load(f)
+    md_path, tex_path = write_paper_tables(summary, args.output_dir)
+    print(f"[paper-table] markdown={md_path}")
+    print(f"[paper-table] latex={tex_path}")
+
+
+if __name__ == "__main__":
+    main()
