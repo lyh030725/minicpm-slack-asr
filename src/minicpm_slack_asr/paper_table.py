@@ -8,6 +8,7 @@ from typing import Any
 
 OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT = 1.40
 OFFICIAL_REFERENCE_LABEL = "MiniCPM-o 4.5 official"
+LATEX_ROW_END = r"\\"
 
 
 def _wer_pct(value: Any) -> str:
@@ -80,19 +81,19 @@ def build_latex_table(summary: dict[str, Any]) -> str:
             r"\label{tab:slack_asr}",
             r"\begin{tabular}{llrrr}",
             r"\toprule",
-            r"Method & Evaluation set & Samples & WER (\%) $\downarrow$ & Rel. WER Red. (\%) $\uparrow$ \\",
+            f"Method & Evaluation set & Samples & WER (\\%) $\\downarrow$ & Rel. WER Red. (\\%) $\\uparrow$ {LATEX_ROW_END}",
             r"\midrule",
             (
                 f"{OFFICIAL_REFERENCE_LABEL} & test-clean (all) & -- & "
-                f"{OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT:.2f} & -- \\\\"
+                f"{OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT:.2f} & -- {LATEX_ROW_END}"
             ),
             (
                 "Baseline (ours) & test-clean ($\\geq 10$ s) & "
-                f"{_samples(baseline)} & {_wer_pct(baseline.get('micro_wer'))} & -- \\\\"
+                f"{_samples(baseline)} & {_wer_pct(baseline.get('micro_wer'))} & -- {LATEX_ROW_END}"
             ),
             (
                 "Slack 2-pass (ours) & test-clean ($\\geq 10$ s) & "
-                f"{_samples(slack)} & {_wer_pct(slack.get('micro_wer'))} & {_pct(rel)} \\\\"
+                f"{_samples(slack)} & {_wer_pct(slack.get('micro_wer'))} & {_pct(rel)} {LATEX_ROW_END}"
             ),
             r"\bottomrule",
             r"\end{tabular}",
