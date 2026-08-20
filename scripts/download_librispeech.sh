@@ -23,4 +23,4 @@ python -m minicpm_slack_asr.manifest \
   --dataset-root "${DATASET_DIR}" \
   --min-duration 10 \
   --max-samples 0 \
-  --output data/manifests/test-clean-gt10.csv
+  --output data/manifests/test-clean-ge10.csv
