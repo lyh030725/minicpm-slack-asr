@@ -1,0 +1,36 @@
+{
+  "selection": "LibriSpeech ASR test-clean, complete standard split",
+  "min_duration_s": 0.0,
+  "conditions": {
+    "baseline": {
+      "samples": 2620,
+      "micro_wer": 0.021017194157029823,
+      "mean_sample_wer": 0.026018990604914916,
+      "substitutions": 845,
+      "deletions": 116,
+      "insertions": 144,
+      "reference_words": 52576,
+      "deadline_miss_chunks": 0,
+      "draft_tokens": 0
+    },
+    "slack_2pass": {
+      "samples": 2620,
+      "micro_wer": 0.027522063298843578,
+      "mean_sample_wer": 0.03608475526238332,
+      "substitutions": 1063,
+      "deletions": 203,
+      "insertions": 181,
+      "reference_words": 52576,
+      "deadline_miss_chunks": 0,
+      "draft_tokens": 64349
+    }
+  },
+  "relative_wer_reduction_pct": -30.95022624434389,
+  "absolute_wer_change": 0.006504869141813755,
+  "selected_samples": 2620,
+  "requested_conditions": [
+    "baseline",
+    "slack_2pass"
+  ],
+  "max_samples": 0
+}

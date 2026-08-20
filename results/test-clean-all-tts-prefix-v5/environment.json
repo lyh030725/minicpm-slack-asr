@@ -1,0 +1,86 @@
+{
+  "created_unix_s": 1787214233.059084,
+  "python": "3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0]",
+  "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+  "torch": "2.9.1+cu129",
+  "torch_cuda": "12.9",
+  "cuda_available": true,
+  "target_runpod_image": "runpod/pytorch:1.0.7-cu1290-torch291-ubuntu2404",
+  "args": {
+    "dataset_root": "data/LibriSpeech/test-clean",
+    "min_duration": 0.0,
+    "max_samples": 0,
+    "shuffle": false,
+    "seed": 42,
+    "output_dir": "results/test-clean-all-tts-prefix-v5",
+    "conditions": [
+      "baseline",
+      "slack_2pass"
+    ],
+    "realtime": true,
+    "resume": true,
+    "warmup": true,
+    "model_id": "openbmb/MiniCPM-o-4_5",
+    "model_revision": "main",
+    "attn_implementation": "sdpa",
+    "max_final_tokens": 512,
+    "max_draft_tokens_per_chunk": 12,
+    "max_draft_prefix_tokens": 256,
+    "min_slack_ms": 50.0,
+    "initial_decode_guard_ms": 25.0
+  },
+  "model_settings": {
+    "model_id": "openbmb/MiniCPM-o-4_5",
+    "revision": "main",
+    "attn_implementation": "sdpa",
+    "init_vision": false,
+    "init_audio": true,
+    "init_tts": false,
+    "slack_decode": "custom greedy model.llm branch with exact TTS-template assistant prefix",
+    "final_decode": "MiniCPM-o streaming_generate text-only, greedy",
+    "generate_audio": false,
+    "enable_thinking": false,
+    "use_tts_template": true,
+    "assistant_generation_prefix": "<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n<|tts_bos|>",
+    "assistant_prefix_source": "matches upstream streaming_generate(enable_thinking=False, use_tts_template=True)",
+    "tts_bos_token_id": 151703,
+    "thinking_token_mask": {
+      "<think>": 151667,
+      "</think>": 151668
+    },
+    "official_bad_token_suppression_count": 6975,
+    "special_control_token_suppression_count": 79,
+    "terminator_ids": [
+      128247,
+      151645,
+      151704
+    ],
+    "terminators": [
+      "<|tts_eos|>",
+      "<|im_end|>",
+      "</s>"
+    ],
+    "draft_raw_think_or_eos_policy": "stop draft without forcing another token",
+    "final_prompt_prefill": "baseline: none; slack: short direct model.llm draft-correction hint",
+    "system_prompt": "You are a precise automatic speech recognition engine. Return transcript text only. Never explain, reason aloud, summarize, answer the speaker, or add labels or preambles.",
+    "streaming_asr_prompt": "Please listen to the audio snippet carefully and transcribe the content.",
+    "baseline_final_prompt": "",
+    "slack_final_prompt_template": "\nTentative transcript (it may contain recognition errors or omissions):\n{draft}\nUse the audio above as the source of truth. Correct the tentative transcript if needed and output only the verbatim transcript.",
+    "max_final_tokens": 512,
+    "max_draft_tokens_per_chunk": 12,
+    "max_draft_prefix_tokens": 256,
+    "min_slack_ms": 50.0,
+    "diagnostic_top_k": 5
+  },
+  "speech_generation": "disabled: init_tts=False; slack uses LLM text decoding and final uses streaming_generate(generate_audio=False, use_tts_template=True)",
+  "transformers": "4.51.0",
+  "model_resolved_sha": "503e754207c94da6bb26850b4469f367c9ea3582",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 4090",
+    "total_memory_bytes": 25250627584,
+    "compute_capability": [
+      8,
+      9
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+\begin{table}[t]
+\centering
+\caption{ASR performance on the full LibriSpeech test-clean split.}
+\label{tab:slack_asr}
+\begin{tabular}{llrrr}
+\toprule
+Method & Evaluation set & Samples & WER (\%) $\downarrow$ & Rel. WER Red. (\%) $\uparrow$ \\
+\midrule
+MiniCPM-o 4.5 official & test-clean & 2620 & 1.40 & -- \\
+Baseline (ours) & test-clean & 2620 & 2.10 & -- \\
+Slack 2-pass (ours) & test-clean & 2620 & 2.75 & -30.95 \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}
+\begin{minipage}{0.98\linewidth}
+\footnotesize \textit{Note:} All rows use the standard LibriSpeech test-clean split. The official 1.40\% WER is shown as a reference. The controlled comparison is Baseline (ours) versus Slack 2-pass (ours), which share the same inference implementation. Relative WER reduction is measured against Baseline (ours).
+\end{minipage}
+\end{table}
