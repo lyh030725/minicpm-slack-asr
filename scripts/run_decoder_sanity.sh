@@ -11,5 +11,5 @@ python -m minicpm_slack_asr.diagnose \
   --max-samples 20 \
   --conditions baseline slack_2pass \
   --realtime \
-  --output-dir results/tts-prefix-ab-sanity \
+  --output-dir results/tts-draft-sanity \
   "$@"
