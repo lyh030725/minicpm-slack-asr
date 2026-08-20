@@ -11,5 +11,5 @@ python -m minicpm_slack_asr.run \
   --max-samples 0 \
   --conditions baseline slack_2pass \
   --realtime \
-  --output-dir results/test-clean-gt10 \
+  --output-dir results/test-clean-ge10 \
   "$@"
