@@ -42,9 +42,9 @@ def build_non_thinking_assistant_prefix(model: Any) -> str:
       <|im_end|>\n<|im_start|>assistant\n + model.think_str
     when ``enable_thinking=False`` and ``use_tts_template=False``.
 
-    ``think_str`` is the Qwen3 hard non-thinking marker (an empty, already-closed
-    <think> block). Omitting it makes Qwen3 enter thinking mode even if earlier
-    streaming_prefill calls used enable_thinking=False.
+    ``think_str`` is the Qwen3 non-thinking marker (an empty, already-closed
+    <think> block). The prefix strongly steers Qwen3 away from reasoning, while
+    decoder-level masking below makes that constraint explicit.
     """
     think_str = getattr(model, "think_str", None)
     if not isinstance(think_str, str) or not think_str:
@@ -60,6 +60,28 @@ def build_non_thinking_assistant_prefix(model: Any) -> str:
             f"cannot be verified: {think_str!r}"
         )
     return prefix
+
+
+def resolve_thinking_token_ids(tokenizer: Any) -> dict[str, int]:
+    """Resolve Qwen3 thinking markers to single token IDs for hard masking.
+
+    Qwen3 exposes <think> and </think> as dedicated tokens. Requiring each marker
+    to map to exactly one token makes the mask explicit and fail-closed: if a future
+    tokenizer revision changes that assumption, the experiment stops instead of
+    silently allowing reasoning text back into ASR output.
+    """
+    result: dict[str, int] = {}
+    for marker in ("<think>", "</think>"):
+        ids = tokenizer.encode(marker, add_special_tokens=False)
+        if len(ids) != 1:
+            raise RuntimeError(
+                f"Cannot hard-mask Qwen3 thinking marker {marker!r}: expected one token, got {ids}. "
+                "Pin a compatible MiniCPM-o 4.5 tokenizer revision."
+            )
+        result[marker] = int(ids[0])
+    if len(set(result.values())) != len(result):
+        raise RuntimeError(f"Unexpected shared token ID for Qwen3 thinking markers: {result}")
+    return result
 
 
 @dataclass(frozen=True)
@@ -125,14 +147,16 @@ class MiniCPMSlackASR:
                 f"required by this experiment: {missing}. Pin a compatible model revision."
             )
 
-        # IMPORTANT: This must match upstream streaming_generate(enable_thinking=False,
-        # use_tts_template=False). A plain assistant prefix causes Qwen3 to emit <think>...</think>
-        # reasoning, contaminating WER and wasting the text-token budget.
+        # Match upstream streaming_generate(enable_thinking=False, use_tts_template=False).
+        # The upstream non-thinking prefix is retained, and the actual <think>/</think>
+        # token IDs are also hard-masked at every greedy decoding step below.
         self._assistant_prefix_text = build_non_thinking_assistant_prefix(self.model)
         self._assistant_prefix_ids = self.tokenizer.encode(
             self._assistant_prefix_text,
             add_special_tokens=False,
         )
+        self._thinking_token_ids = resolve_thinking_token_ids(self.tokenizer)
+        self._forbidden_generation_token_ids = set(self._thinking_token_ids.values())
         self._terminator_ids = {
             int(tid)
             for tok in ("<|im_end|>", "<|endoftext|>", "</s>")
@@ -151,12 +175,12 @@ class MiniCPMSlackASR:
 
     def _decode_text_checked(self, token_ids: list[int], *, phase: str) -> str:
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
-        # Prefix think markers are not part of token_ids. Seeing them here means the model
-        # unexpectedly re-entered reasoning mode; fail instead of silently scoring polluted WER.
+        # Decoder-level masking should make these markers impossible. Keep this check as
+        # a final fail-closed guard against tokenizer/model revision drift.
         if "<think>" in text or "</think>" in text:
             raise RuntimeError(
-                f"Unexpected Qwen3 thinking content during {phase}. Non-thinking prefix may no "
-                f"longer match the selected model revision. Generated text starts with: {text[:200]!r}"
+                f"Qwen3 thinking content escaped the decoder-level mask during {phase}. "
+                f"Generated text starts with: {text[:200]!r}"
             )
         return text
 
@@ -225,7 +249,16 @@ class MiniCPMSlackASR:
         return (time.perf_counter() - start) * 1000.0
 
     def _argmax_token(self, logits: torch.Tensor) -> int:
-        return int(torch.argmax(logits, dim=-1).item())
+        # Prefix steering alone is not a hard constraint: Qwen3 can occasionally
+        # re-enter reasoning and emit <think>. Mask both dedicated marker token IDs
+        # before argmax so neither slack drafts nor final ASR can enter thinking mode.
+        masked_logits = logits.clone()
+        forbidden_ids = sorted(self._forbidden_generation_token_ids)
+        masked_logits[..., forbidden_ids] = float("-inf")
+        next_id = int(torch.argmax(masked_logits, dim=-1).item())
+        if next_id in self._forbidden_generation_token_ids:
+            raise RuntimeError("Decoder selected a forbidden Qwen3 thinking token after masking.")
+        return next_id
 
     def _decode_with_prefix(
         self,
@@ -385,6 +418,8 @@ class MiniCPMSlackASR:
             "enable_thinking": False,
             "assistant_generation_prefix": self._assistant_prefix_text.replace("\n", "\\n"),
             "assistant_prefix_source": "matches upstream streaming_generate(enable_thinking=False, use_tts_template=False)",
+            "thinking_token_mask": dict(self._thinking_token_ids),
+            "thinking_token_mask_scope": "slack draft and final ASR decoding",
             "system_prompt": SYSTEM_PROMPT,
             "streaming_asr_prompt": STREAMING_ASR_PROMPT,
             "baseline_final_prompt": BASELINE_FINAL_PROMPT,
