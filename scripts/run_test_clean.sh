@@ -3,7 +3,8 @@ set -euo pipefail
 
 export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
+unset PYTORCH_CUDA_ALLOC_CONF || true
 
 # Fresh directory for the full standard LibriSpeech test-clean split.
 OUTPUT_DIR="results/test-clean-all-nonthinking"
