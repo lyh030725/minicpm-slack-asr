@@ -29,9 +29,9 @@ def write_manifest(samples, output: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build LibriSpeech test-clean >=10 s manifest.")
+    parser = argparse.ArgumentParser(description="Build a LibriSpeech test-clean manifest.")
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--min-duration", type=float, default=10.0)
+    parser.add_argument("--min-duration", type=float, default=0.0, help="0 selects the complete split.")
     parser.add_argument("--max-samples", type=int, default=0, help="0 = all qualifying samples")
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
