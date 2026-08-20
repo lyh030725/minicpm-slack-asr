@@ -206,6 +206,7 @@ class MiniCPMSlackASR:
 
         self._decode_ms_ema = float(config.initial_decode_guard_ms)
         self._last_final_diagnostics: dict[str, Any] = {}
+        self._last_finalizer_comparison: dict[str, Any] = {}
         self.session_id: str | None = None
 
     @staticmethod
@@ -230,6 +231,7 @@ class MiniCPMSlackASR:
         self.model.reset_session(reset_token2wav_cache=False)
         self._decode_ms_ema = float(self.config.initial_decode_guard_ms)
         self._last_final_diagnostics = {}
+        self._last_finalizer_comparison = {}
 
         self.model.streaming_prefill(
             session_id=session_id,
@@ -560,8 +562,116 @@ class MiniCPMSlackASR:
             )
         return text, final_prompt_ms + prefix_ms, decode_ms
 
+    def finalize_official_text_only(self, *, draft_text: str | None) -> tuple[str, float, float]:
+        """Finalize through MiniCPM-o's upstream streaming_generate text-only path.
+
+        The accumulated audio KV and optional draft-correction prompt are unchanged.
+        Only the decoder implementation differs from ``finalize``: MiniCPM-o builds
+        its own non-thinking assistant prefix and runs ChunkPrefillChunkGenerate with
+        ``generate_audio=False``. No TTS/audio decoding is initialized or invoked.
+        ``do_sample=False`` keeps this A/B comparison deterministic and closest to the
+        custom greedy decoder.
+        """
+        if self.session_id is None:
+            raise RuntimeError("reset_for_sample() must be called first.")
+        final_prompt = build_final_prompt(draft_text)
+        final_prompt_ms = self._prefill_raw_text(final_prompt) if final_prompt else 0.0
+
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        pieces: list[str] = []
+        iterator = self.model.streaming_generate(
+            session_id=self.session_id,
+            generate_audio=False,
+            max_new_tokens=self.config.max_final_tokens,
+            enable_thinking=False,
+            use_tts_template=False,
+            do_sample=False,
+        )
+        for item in iterator:
+            if not isinstance(item, tuple) or not item:
+                continue
+            text_chunk = item[0]
+            if text_chunk:
+                pieces.append(str(text_chunk))
+        torch.cuda.synchronize()
+        decode_ms = (time.perf_counter() - start) * 1000.0
+        return "".join(pieces).strip(), final_prompt_ms, decode_ms
+
+    def compare_finalizers(self, *, draft_text: str | None) -> dict[str, Any]:
+        """Run custom and upstream text-only finalizers from the exact same pre-final state."""
+        required = ["save_speculative_snapshot", "restore_speculative_snapshot", "streaming_generate"]
+        missing = [name for name in required if not hasattr(self.model, name)]
+        if missing:
+            raise RuntimeError(f"MiniCPM-o revision lacks finalizer-comparison APIs: {missing}")
+
+        pre_final_cache_len = self.cache_length()
+        snapshot = self.model.save_speculative_snapshot()
+
+        custom: dict[str, Any] = {
+            "text": "",
+            "prompt_prefix_ms": None,
+            "decode_ms": None,
+            "diagnostics": {},
+            "error": None,
+        }
+        try:
+            text, prompt_prefix_ms, decode_ms = self.finalize(draft_text=draft_text)
+            custom.update(
+                {
+                    "text": text,
+                    "prompt_prefix_ms": prompt_prefix_ms,
+                    "decode_ms": decode_ms,
+                    "diagnostics": self.final_diagnostics(),
+                }
+            )
+        except Exception as exc:
+            custom["error"] = repr(exc)
+            custom["diagnostics"] = self.final_diagnostics()
+
+        restored = self.model.restore_speculative_snapshot(snapshot)
+        if not restored:
+            raise RuntimeError("Failed to restore exact pre-final MiniCPM-o state for decoder A/B comparison.")
+        restored_cache_len = self.cache_length()
+        if restored_cache_len != pre_final_cache_len:
+            raise RuntimeError(
+                "Pre-final KV restore length mismatch during decoder A/B comparison: "
+                f"before={pre_final_cache_len}, restored={restored_cache_len}"
+            )
+
+        official: dict[str, Any] = {
+            "text": "",
+            "prompt_prefix_ms": None,
+            "decode_ms": None,
+            "error": None,
+        }
+        try:
+            text, prompt_prefix_ms, decode_ms = self.finalize_official_text_only(draft_text=draft_text)
+            official.update(
+                {
+                    "text": text,
+                    "prompt_prefix_ms": prompt_prefix_ms,
+                    "decode_ms": decode_ms,
+                }
+            )
+        except Exception as exc:
+            official["error"] = repr(exc)
+
+        comparison = {
+            "pre_final_cache_len": pre_final_cache_len,
+            "restored_cache_len": restored_cache_len,
+            "same_pre_final_state": pre_final_cache_len == restored_cache_len,
+            "custom": custom,
+            "official_text_only": official,
+        }
+        self._last_finalizer_comparison = comparison
+        return comparison
+
     def final_diagnostics(self) -> dict[str, Any]:
         return dict(self._last_final_diagnostics)
+
+    def finalizer_comparison(self) -> dict[str, Any]:
+        return dict(self._last_finalizer_comparison)
 
     def model_settings(self) -> dict[str, Any]:
         return {
@@ -583,6 +693,10 @@ class MiniCPMSlackASR:
             "final_min_new_tokens": 1,
             "draft_raw_think_or_eos_policy": "stop draft without forcing another token",
             "final_prompt_prefill": "baseline: none; slack: short direct model.llm draft-correction hint",
+            "diagnostic_official_finalizer": (
+                "streaming_generate(generate_audio=False, use_tts_template=False, "
+                "enable_thinking=False, do_sample=False)"
+            ),
             "system_prompt": SYSTEM_PROMPT,
             "streaming_asr_prompt": STREAMING_ASR_PROMPT,
             "baseline_final_prompt": BASELINE_FINAL_PROMPT,
