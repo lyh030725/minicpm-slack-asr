@@ -5,7 +5,9 @@ export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-OUTPUT_DIR="results/test-clean-ge10"
+# Use a fresh directory so pre-fix runs that contained Qwen3 <think> output are never
+# accidentally resumed into the corrected experiment.
+OUTPUT_DIR="results/test-clean-ge10-nonthinking"
 
 python -m minicpm_slack_asr.run \
   --dataset-root data/LibriSpeech/test-clean \
