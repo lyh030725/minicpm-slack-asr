@@ -29,7 +29,7 @@ def write_manifest(samples, output: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build LibriSpeech test-clean >10 s manifest.")
+    parser = argparse.ArgumentParser(description="Build LibriSpeech test-clean >=10 s manifest.")
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--min-duration", type=float, default=10.0)
     parser.add_argument("--max-samples", type=int, default=0, help="0 = all qualifying samples")
@@ -46,7 +46,7 @@ def main() -> None:
         seed=args.seed,
     )
     write_manifest(samples, args.output)
-    print(f"[manifest] selected={len(samples)} duration>{args.min_duration}s output={args.output}")
+    print(f"[manifest] selected={len(samples)} duration>={args.min_duration}s output={args.output}")
 
 
 if __name__ == "__main__":
