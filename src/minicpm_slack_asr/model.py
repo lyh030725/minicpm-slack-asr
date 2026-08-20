@@ -10,24 +10,56 @@ import torch
 from transformers import AutoModel
 
 
-SYSTEM_PROMPT = "You are a precise automatic speech recognition assistant."
+SYSTEM_PROMPT = (
+    "You are a precise automatic speech recognition engine. Return transcript text only. "
+    "Never explain, reason aloud, summarize, answer the speaker, or add labels or preambles."
+)
 STREAMING_ASR_PROMPT = (
     "Please listen to the English audio carefully and transcribe the speech verbatim. "
     "During streaming, if a tentative transcript is already present as the assistant prefix, "
     "continue it only with words that have already been spoken. Do not answer the speaker, "
-    "summarize, explain, or predict future words. When the audio is complete, review the entire "
-    "utterance and output only one corrected final transcript."
+    "summarize, explain, reason aloud, or predict future words. Output only spoken words; do not "
+    "write labels such as 'Transcription:' or any preamble. When the audio is complete, review the "
+    "entire utterance and output only one corrected final transcript."
 )
 BASELINE_FINAL_PROMPT = (
-    "\nThe audio is complete. Review the entire utterance and output only the final verbatim transcript."
+    "\nThe audio is complete. Review the entire utterance and output only the spoken words as the "
+    "final verbatim transcript. Do not include reasoning, explanations, labels, or preambles."
 )
 SLACK_FINAL_PROMPT_TEMPLATE = (
     "\nThe audio is complete. The following is a tentative first-pass transcript produced during "
-    "listening and it may contain recognition errors or omissions:\n{draft}\n"
-    "Re-check the full audio, correct any misheard or missing words, and output only the final "
-    "verbatim transcript."
+    "listening and it may contain recognition errors, omissions, or formatting artifacts:\n{draft}\n"
+    "Re-check the full audio, correct any misheard or missing words, ignore any non-speech formatting "
+    "in the draft, and output only the spoken words as the final verbatim transcript. Do not include "
+    "reasoning, explanations, labels, or preambles."
 )
-ASSISTANT_PREFIX = "<|im_end|>\n<|im_start|>assistant\n"
+
+
+def build_non_thinking_assistant_prefix(model: Any) -> str:
+    """Match MiniCPM-o 4.5's own streaming_generate non-thinking BOS prefix.
+
+    Upstream MiniCPM-o constructs text generation with:
+      <|im_end|>\n<|im_start|>assistant\n + model.think_str
+    when ``enable_thinking=False`` and ``use_tts_template=False``.
+
+    ``think_str`` is the Qwen3 hard non-thinking marker (an empty, already-closed
+    <think> block). Omitting it makes Qwen3 enter thinking mode even if earlier
+    streaming_prefill calls used enable_thinking=False.
+    """
+    think_str = getattr(model, "think_str", None)
+    if not isinstance(think_str, str) or not think_str:
+        raise RuntimeError(
+            "MiniCPM-o model.think_str is unavailable. Cannot safely reproduce the upstream "
+            "Qwen3 non-thinking generation prefix; pin a compatible MiniCPM-o 4.5 revision."
+        )
+    think_str = think_str.replace("\\n", "\n")
+    prefix = "<|im_end|>\n<|im_start|>assistant\n" + think_str
+    if "<think>" not in prefix or "</think>" not in prefix:
+        raise RuntimeError(
+            "Unexpected MiniCPM-o think_str. Refusing to run because non-thinking decoding "
+            f"cannot be verified: {think_str!r}"
+        )
+    return prefix
 
 
 @dataclass(frozen=True)
@@ -93,7 +125,14 @@ class MiniCPMSlackASR:
                 f"required by this experiment: {missing}. Pin a compatible model revision."
             )
 
-        self._assistant_prefix_ids = self.tokenizer.encode(ASSISTANT_PREFIX, add_special_tokens=False)
+        # IMPORTANT: This must match upstream streaming_generate(enable_thinking=False,
+        # use_tts_template=False). A plain assistant prefix causes Qwen3 to emit <think>...</think>
+        # reasoning, contaminating WER and wasting the text-token budget.
+        self._assistant_prefix_text = build_non_thinking_assistant_prefix(self.model)
+        self._assistant_prefix_ids = self.tokenizer.encode(
+            self._assistant_prefix_text,
+            add_special_tokens=False,
+        )
         self._terminator_ids = {
             int(tid)
             for tok in ("<|im_end|>", "<|endoftext|>", "</s>")
@@ -109,6 +148,17 @@ class MiniCPMSlackASR:
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
+    def _decode_text_checked(self, token_ids: list[int], *, phase: str) -> str:
+        text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
+        # Prefix think markers are not part of token_ids. Seeing them here means the model
+        # unexpectedly re-entered reasoning mode; fail instead of silently scoring polluted WER.
+        if "<think>" in text or "</think>" in text:
+            raise RuntimeError(
+                f"Unexpected Qwen3 thinking content during {phase}. Non-thinking prefix may no "
+                f"longer match the selected model revision. Generated text starts with: {text[:200]!r}"
+            )
+        return text
 
     def reset_for_sample(self, session_id: str) -> None:
         self._seed_all(self.config.seed)
@@ -294,7 +344,7 @@ class MiniCPMSlackASR:
             raise RuntimeError(
                 f"Draft KV rollback failed: before={cache_len_before}, after={cache_len_after}"
             )
-        new_text = self.tokenizer.decode(new_ids, skip_special_tokens=True)
+        new_text = self._decode_text_checked(new_ids, phase="slack draft")
         return DraftStepResult(
             new_token_ids=new_ids,
             new_text=new_text,
@@ -320,7 +370,7 @@ class MiniCPMSlackASR:
             max_new_tokens=self.config.max_final_tokens,
             deadline_s=None,
         )
-        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        text = self._decode_text_checked(generated_ids, phase="final ASR").strip()
         return text, final_prompt_ms + prefix_ms, decode_ms
 
     def model_settings(self) -> dict[str, Any]:
@@ -332,6 +382,9 @@ class MiniCPMSlackASR:
             "init_audio": True,
             "init_tts": False,
             "decode": "greedy argmax on model.llm only",
+            "enable_thinking": False,
+            "assistant_generation_prefix": self._assistant_prefix_text.replace("\n", "\\n"),
+            "assistant_prefix_source": "matches upstream streaming_generate(enable_thinking=False, use_tts_template=False)",
             "system_prompt": SYSTEM_PROMPT,
             "streaming_asr_prompt": STREAMING_ASR_PROMPT,
             "baseline_final_prompt": BASELINE_FINAL_PROMPT,
