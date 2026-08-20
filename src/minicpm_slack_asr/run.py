@@ -197,9 +197,8 @@ def _run_condition(
         kv_before = runner.cache_length()
         kv_after = kv_before
 
-        # There is no "next audio" deadline after the last chunk. At that point the
-        # second pass starts immediately, so the last chunk is intentionally not used
-        # for speculative first-pass decoding.
+        # There is no next-audio deadline after the last chunk. The second pass starts
+        # immediately, so the last chunk is intentionally not used for draft decoding.
         if condition == "slack_2pass" and not is_last_chunk:
             draft_started = slack_before_ms >= runner.config.min_slack_ms
             step = runner.draft_in_slack(draft_ids, deadline_s=deadline)
@@ -294,9 +293,15 @@ def _counts_from_row(row: dict[str, Any]) -> WERCounts:
     )
 
 
-def _build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_summary(rows: list[dict[str, Any]], *, min_duration: float) -> dict[str, Any]:
+    if min_duration <= 0:
+        selection = "LibriSpeech ASR test-clean, complete standard split"
+    else:
+        selection = f"LibriSpeech ASR test-clean, duration >= {min_duration:g} seconds"
+
     summary: dict[str, Any] = {
-        "selection": "LibriSpeech ASR test-clean, duration >= 10 seconds, no sample limit by default",
+        "selection": selection,
+        "min_duration_s": min_duration,
         "conditions": {},
     }
     condition_counts: dict[str, WERCounts] = {}
@@ -333,11 +338,16 @@ def parse_args() -> argparse.Namespace:
         description="Training-free two-pass ASR using MiniCPM-o 4.5 LLM listening slack."
     )
     parser.add_argument("--dataset-root", type=Path, default=Path("data/LibriSpeech/test-clean"))
-    parser.add_argument("--min-duration", type=float, default=10.0, help="Inclusive lower bound; default selects >=10 s.")
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=0.0,
+        help="Inclusive lower bound in seconds. Default 0 evaluates the complete test-clean split.",
+    )
     parser.add_argument("--max-samples", type=int, default=0, help="0 means every qualifying sample.")
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/test-clean-ge10"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/test-clean-all-nonthinking"))
     parser.add_argument(
         "--conditions",
         nargs="+",
@@ -378,7 +388,10 @@ def main() -> None:
         )
     write_manifest(samples, args.output_dir / "manifest.csv")
 
-    print(f"[data] selected={len(samples)} test-clean utterances with duration>={args.min_duration}s")
+    if args.min_duration <= 0:
+        print(f"[data] selected={len(samples)} utterances from the complete LibriSpeech test-clean split")
+    else:
+        print(f"[data] selected={len(samples)} test-clean utterances with duration>={args.min_duration}s")
     print(f"[data] max_samples={args.max_samples} (0 means all)")
     print(f"[run] conditions={args.conditions} realtime={args.realtime}")
     print("[model] speech decoding disabled: init_tts=False, LLM text tokens only")
@@ -424,7 +437,8 @@ def main() -> None:
         if chunk_mode == "w":
             chunk_writer.writeheader()
 
-        for sample in tqdm(samples, desc="LibriSpeech >=10s"):
+        progress_desc = "LibriSpeech test-clean" if args.min_duration <= 0 else f"LibriSpeech >={args.min_duration:g}s"
+        for sample in tqdm(samples, desc=progress_desc):
             for condition in args.conditions:
                 key = (sample.sample_id, condition)
                 if key in completed:
@@ -452,7 +466,7 @@ def main() -> None:
 
     # Reload so resumed rows and numeric text have one consistent representation.
     final_rows, _ = _load_existing_samples(samples_csv)
-    summary = _build_summary(final_rows)
+    summary = _build_summary(final_rows, min_duration=args.min_duration)
     summary["selected_samples"] = len(samples)
     summary["requested_conditions"] = args.conditions
     summary["max_samples"] = args.max_samples
