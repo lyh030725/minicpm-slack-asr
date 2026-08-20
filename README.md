@@ -46,50 +46,61 @@ LLM-only second-pass correction
 final ASR text
 ```
 
+## Important: Qwen3 non-thinking decoding
+
+Both the slack draft and final ASR use MiniCPM-o's upstream **non-thinking** generation prefix. MiniCPM-o's own `streaming_generate(enable_thinking=False, use_tts_template=False)` starts generation with:
+
+```text
+<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+```
+
+The empty already-closed `<think>` block is required by Qwen3's hard non-thinking mode. Omitting it makes raw `model.llm` decoding enter `<think>...</think>` reasoning even when earlier `streaming_prefill()` calls used `enable_thinking=False`.
+
+This project therefore builds the prefix from `model.think_str`, matching the upstream MiniCPM-o implementation. If generated draft/final token IDs unexpectedly contain `<think>` or `</think>`, the run raises an error rather than silently contaminating WER.
+
+The prompt also explicitly requires transcript-only output with no `Transcription:` label, preamble, explanation, or reasoning.
+
 ## Dataset
 
 The default experiment uses **every LibriSpeech ASR `test-clean` utterance whose duration is greater than or equal to 10 seconds**.
-
-There is no sample cap in the default run:
 
 ```text
 min_duration >= 10.0 s
 max_samples = 0   # all qualifying utterances
 ```
 
-The final partial second of an utterance is zero-padded to one second so no real speech samples are dropped. The number of real samples is recorded in `chunks.csv`.
+The final partial second is zero-padded so no real speech samples are dropped.
 
-## Two conditions
+## Conditions
 
-The default command evaluates both conditions on the same selected utterances.
+### `baseline`
 
-### 1. `baseline`
+1. Stream the complete audio in 1-second chunks.
+2. Do no intermediate decoding.
+3. After the complete audio is available, generate one final verbatim transcript with the LLM backbone only.
 
-1. Stream the complete audio through MiniCPM-o in 1-second chunks.
-2. Do **no** intermediate decoding.
-3. After the complete audio is available, ask the LLM backbone for one final verbatim transcript.
-
-### 2. `slack_2pass`
+### `slack_2pass`
 
 1. Stream the same audio in 1-second chunks.
-2. After each non-final chunk, compute the wall-clock time remaining until the next 1-second deadline.
-3. If enough time remains, use only that budget for tentative LLM text decoding.
-4. Restore the LLM KV cache to the exact state it had immediately after the audio prefill.
-5. Keep the generated text externally as the tentative first-pass transcript.
-6. After the complete utterance, give that tentative transcript back as an explicitly fallible draft and ask the LLM to re-check the full audio and produce the final transcript.
+2. After each non-final chunk, compute the time remaining until the next 1-second deadline.
+3. Use only that slack for tentative LLM text decoding.
+4. Roll the LLM KV cache back to the exact post-audio-prefill state.
+5. Keep only the tentative transcript externally.
+6. After the complete utterance, give the fallible draft back to the LLM and produce a corrected final transcript.
 
-This gives a clean comparison of final WER with and without listening-slack work.
+The main comparison is final WER of `baseline` vs. `slack_2pass` on the identical >=10 s subset.
 
-## Why the tentative draft does not remain in the main KV cache
-
-Intermediate decoding is speculative. If a wrong word is permanently appended to the same KV cache used by later audio chunks, the model can self-condition on its own mistake.
-
-This implementation therefore temporarily extends the audio-stream LLM KV cache and then truncates it back:
+## Draft KV isolation
 
 ```text
                          temporary branch
                               |
-audio KV after chunk ----------+---- assistant prefix + tentative text
+audio KV after chunk ----------+---- non-thinking assistant prefix + tentative text
        |
        |                             decode inside slack
        |                                   |
@@ -98,21 +109,13 @@ audio KV after chunk ----------+---- assistant prefix + tentative text
 next audio chunk
 ```
 
-Only the text string/token IDs are retained externally. The second pass receives that text as a draft that may be corrected.
+For every successful speculative step:
 
-The current upstream MiniCPM-o model already exposes cache-length/truncation helpers used by its own speculative streaming logic; this project relies on those helpers. For final reproducible experiments, pin the model revision and keep the resolved Hugging Face SHA recorded in `environment.json`.
+```text
+kv_cache_before_draft == kv_cache_after_restore
+```
 
-## Prompting
-
-No training or fine-tuning is used. The prompt tells the model to:
-
-- perform verbatim English ASR,
-- continue a tentative assistant transcript only with speech already heard,
-- avoid answering, summarizing, or predicting future words,
-- treat the first-pass transcript as fallible,
-- re-check the full utterance before the final transcript.
-
-The exact prompts used in a run are written into `environment.json`.
+The run raises an error if this invariant fails.
 
 ## Slack policy
 
@@ -122,17 +125,19 @@ For each non-final 1-second chunk:
 slack = next_audio_deadline - audio_prefill_finish_time
 ```
 
-Tentative decoding begins only when at least `--min-slack-ms` remains (50 ms by default).
+Tentative decoding begins only when at least `--min-slack-ms` remains (50 ms by default). Generation is token-by-token greedy decoding. A latency EMA with a 1.2x guard prevents intentionally starting a token that is expected to cross the next audio deadline.
 
-Generation is greedy and token-by-token. The implementation keeps an EMA of observed token latency and refuses to intentionally begin another token forward pass when the remaining time is smaller than a 1.2x latency guard.
-
-The first-pass generation also has a semantic cap of 12 new text tokens per audio chunk by default. This avoids turning unused compute into aggressive future-word prediction. Change it with:
+The first-pass semantic cap is 12 new tokens per audio chunk by default:
 
 ```bash
 --max-draft-tokens-per-chunk N
 ```
 
-The complete tentative transcript is used as the second-pass draft. Up to 256 of its most recent tokens are re-prefilled as the assistant prefix during each intermediate branch; for typical LibriSpeech >=10 s utterances this generally covers the whole draft.
+Up to 256 recent draft tokens are re-prefilled as the tentative assistant prefix:
+
+```bash
+--max-draft-prefix-tokens N
+```
 
 ## RunPod environment
 
@@ -142,9 +147,7 @@ Target image:
 runpod/pytorch:1.0.7-cu1290-torch291-ubuntu2404
 ```
 
-The setup script intentionally preserves the image's PyTorch/CUDA installation.
-
-### 1. Install
+Install:
 
 ```bash
 bash scripts/setup_runpod.sh
@@ -158,25 +161,25 @@ export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
 
-### 2. Download LibriSpeech test-clean
+Download LibriSpeech:
 
 ```bash
 bash scripts/download_librispeech.sh
 ```
 
-This also creates:
-
-```text
-data/manifests/test-clean-ge10.csv
-```
-
-containing every utterance with duration greater than or equal to 10 seconds.
-
-### 3. Run the complete experiment
+Run the complete experiment:
 
 ```bash
 bash scripts/run_test_clean.sh
 ```
+
+The fixed run script deliberately writes to a fresh directory:
+
+```text
+results/test-clean-ge10-nonthinking/
+```
+
+This prevents pre-fix rows containing Qwen3 reasoning output from being resumed into the corrected experiment.
 
 Equivalent command:
 
@@ -187,22 +190,35 @@ python -m minicpm_slack_asr.run \
   --max-samples 0 \
   --conditions baseline slack_2pass \
   --realtime \
-  --output-dir results/test-clean-ge10
+  --output-dir results/test-clean-ge10-nonthinking
 ```
 
-`--max-samples 0` is important: it means **all** qualifying >=10-second samples.
+For a short GPU sanity check before the full run:
 
-For a quick code check before the full run, you can temporarily use e.g. `--max-samples 2 --no-realtime`. Do not use that for the final reported experiment.
+```bash
+python -m minicpm_slack_asr.run \
+  --dataset-root data/LibriSpeech/test-clean \
+  --min-duration 10 \
+  --max-samples 3 \
+  --conditions baseline slack_2pass \
+  --no-realtime \
+  --no-resume \
+  --output-dir results/sanity-nonthinking
+```
+
+A healthy console result should contain only transcript text in `final=...`; it should not contain `<think>`, `Transcription is:`, or reasoning prose.
 
 ## Outputs
 
 ```text
-results/test-clean-ge10/
+results/test-clean-ge10-nonthinking/
 ├── manifest.csv
 ├── samples.csv
 ├── chunks.csv
 ├── summary.json
-└── environment.json
+├── environment.json
+├── paper_table.md
+└── paper_table.tex
 ```
 
 ### `samples.csv`
@@ -215,58 +231,42 @@ One row per sample/condition, including:
 - first-pass WER
 - final WER
 - substitutions / deletions / insertions
-- total audio prefill time
-- total draft compute time
+- audio-prefill time
+- draft-compute time
 - final decode time
-- number of chunks that missed the 1-second deadline
+- deadline-miss chunks
+- total draft tokens
 
 ### `chunks.csv`
 
-Per streaming chunk diagnostics, including:
+Per streaming chunk diagnostics include:
 
 - audio prefill time
-- slack available before draft decoding
-- tentative tokens generated in that slack
-- tentative text so far
-- draft-prefix prefill/decode time
-- remaining time at the deadline
-- deadline miss flag
-- LLM KV length before speculative decoding and after rollback
-
-For every successful rollback:
-
-```text
-kv_cache_before_draft == kv_cache_after_restore
-```
-
-The run raises an error if this invariant fails.
+- slack before draft decoding
+- `draft_new_text`
+- `draft_so_far`
+- draft prefix/decode time
+- deadline remaining time
+- deadline miss
+- KV length before draft and after rollback
 
 ### `summary.json`
 
-Reports micro-WER for `baseline` and `slack_2pass`, plus:
+Reports micro-WER for `baseline` and `slack_2pass` plus relative/absolute WER changes.
 
-```text
-relative_wer_reduction_pct
-absolute_wer_change
-```
+### Paper table
 
-A positive `relative_wer_reduction_pct` means the slack-assisted two-pass condition improved WER.
+After `scripts/run_test_clean.sh` finishes, `paper_table.md` and `paper_table.tex` compare:
+
+1. MiniCPM-o 4.5 official LibriSpeech test-clean WER (1.40%, full test-clean, reference only),
+2. our baseline on test-clean >=10 s,
+3. our Slack 2-pass result on the same >=10 s subset.
+
+The official 1.40% number is not an apples-to-apples subset comparison; the controlled comparison is our baseline vs. Slack 2-pass.
 
 ## Resume behavior
 
-The full >=10-second set can take a while. `--resume` is enabled by default. If `samples.csv` already contains a completed `(sample_id, condition)`, that condition is skipped on the next invocation.
-
-Disable this with:
-
-```bash
---no-resume
-```
-
-## Important implementation detail
-
-This repository does **not** call MiniCPM-o's speech-generation path and does **not** merely generate audio and then hide/playback-disable it. The TTS module is not initialized at model load time, and text decoding calls the LLM backbone directly.
-
-That distinction is central to the experiment: the available compute is spent on text-token ASR rather than speech-token decoding.
+`--resume` is enabled by default. Completed `(sample_id, condition)` pairs in the selected output directory are skipped. Use `--no-resume` to restart that output directory from scratch.
 
 ## Tests
 
@@ -276,9 +276,10 @@ CPU-only utility tests:
 pytest -q
 ```
 
-They cover WER computation and preservation of the final partial LibriSpeech audio chunk.
+Tests cover WER, LibriSpeech duration selection/tail preservation, paper-table generation, and the upstream-compatible Qwen3 non-thinking assistant prefix.
 
 ## Upstream references
 
 - MiniCPM-o 4.5: https://huggingface.co/openbmb/MiniCPM-o-4_5
+- Qwen3-8B: https://huggingface.co/Qwen/Qwen3-8B
 - LibriSpeech / OpenSLR 12: https://www.openslr.org/12
