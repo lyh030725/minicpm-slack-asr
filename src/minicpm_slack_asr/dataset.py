@@ -49,7 +49,7 @@ def discover_librispeech(
     shuffle: bool = False,
     seed: int = 42,
 ) -> list[AudioSample]:
-    """Discover LibriSpeech FLAC files with duration strictly greater than min_duration_s.
+    """Discover LibriSpeech FLAC files with duration greater than or equal to min_duration_s.
 
     ``max_samples=0`` means all qualifying utterances. References are read from the
     standard ``*.trans.txt`` files shipped with LibriSpeech.
@@ -63,7 +63,7 @@ def discover_librispeech(
     for path in sorted(root.rglob("*.flac")):
         info = sf.info(str(path))
         duration_s = float(info.frames) / float(info.samplerate)
-        if duration_s <= min_duration_s:
+        if duration_s < min_duration_s:
             continue
         sample_id = path.stem
         reference = transcripts.get(sample_id)
