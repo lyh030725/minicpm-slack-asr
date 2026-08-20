@@ -32,10 +32,17 @@ class DummyTokenizer:
         return self.token_map.get(token, 999)
 
 
-def test_non_thinking_prefix_matches_upstream_shape():
-    prefix = build_non_thinking_assistant_prefix(DummyMiniCPM())
+def test_non_thinking_prefix_matches_upstream_without_tts_template():
+    prefix = build_non_thinking_assistant_prefix(DummyMiniCPM(), use_tts_template=False)
     assert prefix == "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     assert prefix.endswith("</think>\n\n")
+    assert "<|tts_bos|>" not in prefix
+
+
+def test_non_thinking_prefix_matches_upstream_with_tts_template():
+    prefix = build_non_thinking_assistant_prefix(DummyMiniCPM(), use_tts_template=True)
+    assert prefix == "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<|tts_bos|>"
+    assert prefix.endswith("<|tts_bos|>")
 
 
 def test_thinking_markers_resolve_to_dedicated_token_ids():
@@ -56,17 +63,19 @@ def test_official_forbidden_ids_include_bad_ids_and_upstream_tokens():
 def test_argmax_masks_forbidden_ids():
     runner = object.__new__(MiniCPMSlackASR)
     runner._forbidden_generation_token_ids = {1, 3}
+    runner._terminator_ids = set()
 
     logits = torch.tensor([[0.1, 100.0, 2.0, 99.0]], dtype=torch.float32)
     assert runner._argmax_token(logits) == 2
 
 
-def test_final_min_token_masks_terminator_until_text_exists():
+def test_optional_min_token_mask_still_works_for_diagnostics():
     runner = object.__new__(MiniCPMSlackASR)
     runner._forbidden_generation_token_ids = {1}
     runner._terminator_ids = {2}
 
-    # token 1 is forbidden, token 2 is EOS, token 3 is real text.
+    # The primary finalizer no longer forces a minimum token; this helper behavior is
+    # retained only for controlled diagnostics/custom decoding.
     logits = torch.tensor([[0.0, 100.0, 90.0, 80.0]], dtype=torch.float32)
     assert runner._argmax_token(logits, generated_count=0, min_new_tokens=1) == 3
     assert runner._argmax_token(logits, generated_count=1, min_new_tokens=1) == 2
