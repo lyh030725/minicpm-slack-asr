@@ -6,8 +6,8 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 unset PYTORCH_CUDA_ALLOC_CONF || true
 
-# Fresh directory so all rows use the same decoder-level thinking-token mask.
-OUTPUT_DIR="results/test-clean-all-hardmask"
+# Fresh directory so no rows from the older verbose final prompt are resumed.
+OUTPUT_DIR="results/test-clean-all-finalprefill-v2"
 
 python -m minicpm_slack_asr.run \
   --dataset-root data/LibriSpeech/test-clean \
