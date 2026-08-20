@@ -7,6 +7,7 @@ from typing import Any
 
 
 OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT = 1.40
+OFFICIAL_TEST_CLEAN_SAMPLES = 2620
 OFFICIAL_REFERENCE_LABEL = "MiniCPM-o 4.5 official"
 LATEX_ROW_END = r"\\"
 
@@ -42,25 +43,24 @@ def build_markdown_table(summary: dict[str, Any]) -> str:
         "| Method | Evaluation set | Samples | WER (%) ↓ | Rel. WER Reduction (%) ↑ |",
         "|---|---|---:|---:|---:|",
         (
-            f"| {OFFICIAL_REFERENCE_LABEL} | LibriSpeech test-clean (all) | — | "
-            f"{OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT:.2f} | — |"
+            f"| {OFFICIAL_REFERENCE_LABEL} | LibriSpeech test-clean | "
+            f"{OFFICIAL_TEST_CLEAN_SAMPLES} | {OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT:.2f} | — |"
         ),
         (
-            "| Baseline (ours) | LibriSpeech test-clean, ≥10 s | "
+            "| Baseline (ours) | LibriSpeech test-clean | "
             f"{_samples(baseline)} | {_wer_pct(baseline.get('micro_wer'))} | — |"
         ),
         (
-            "| Slack 2-pass (ours) | LibriSpeech test-clean, ≥10 s | "
+            "| Slack 2-pass (ours) | LibriSpeech test-clean | "
             f"{_samples(slack)} | {_wer_pct(slack.get('micro_wer'))} | {_pct(rel)} |"
         ),
         "",
         (
-            "**Note.** The official MiniCPM-o 4.5 WER (1.40%) is reported on the full "
-            "LibriSpeech test-clean set, whereas our baseline and Slack 2-pass results use "
-            "only utterances with duration ≥10 s. Therefore, the primary apples-to-apples "
-            "comparison is Baseline (ours) vs. Slack 2-pass (ours); the official number is "
-            "included as a reference sanity check. Relative WER reduction is computed against "
-            "Baseline (ours)."
+            "**Note.** All rows use the standard LibriSpeech test-clean split. The official "
+            "MiniCPM-o 4.5 value (1.40% WER) is included as a reference; the primary controlled "
+            "comparison is still Baseline (ours) vs. Slack 2-pass (ours), because they use the "
+            "same inference implementation and differ only in the listening-slack two-pass method. "
+            "Relative WER reduction is computed against Baseline (ours)."
         ),
         "",
     ]
@@ -77,29 +77,29 @@ def build_latex_table(summary: dict[str, Any]) -> str:
         [
             r"\begin{table}[t]",
             r"\centering",
-            r"\caption{ASR performance on LibriSpeech test-clean. The official MiniCPM-o 4.5 result is shown for reference; our two methods are evaluated on the identical subset of utterances with duration $\geq 10$ s.}",
+            r"\caption{ASR performance on the full LibriSpeech test-clean split.}",
             r"\label{tab:slack_asr}",
             r"\begin{tabular}{llrrr}",
             r"\toprule",
             f"Method & Evaluation set & Samples & WER (\\%) $\\downarrow$ & Rel. WER Red. (\\%) $\\uparrow$ {LATEX_ROW_END}",
             r"\midrule",
             (
-                f"{OFFICIAL_REFERENCE_LABEL} & test-clean (all) & -- & "
+                f"{OFFICIAL_REFERENCE_LABEL} & test-clean & {OFFICIAL_TEST_CLEAN_SAMPLES} & "
                 f"{OFFICIAL_MINICPMO45_TEST_CLEAN_WER_PCT:.2f} & -- {LATEX_ROW_END}"
             ),
             (
-                "Baseline (ours) & test-clean ($\\geq 10$ s) & "
+                "Baseline (ours) & test-clean & "
                 f"{_samples(baseline)} & {_wer_pct(baseline.get('micro_wer'))} & -- {LATEX_ROW_END}"
             ),
             (
-                "Slack 2-pass (ours) & test-clean ($\\geq 10$ s) & "
+                "Slack 2-pass (ours) & test-clean & "
                 f"{_samples(slack)} & {_wer_pct(slack.get('micro_wer'))} & {_pct(rel)} {LATEX_ROW_END}"
             ),
             r"\bottomrule",
             r"\end{tabular}",
             r"\vspace{2pt}",
             r"\begin{minipage}{0.98\linewidth}",
-            r"\footnotesize \textit{Note:} The official 1.40\% WER is reported on the full LibriSpeech test-clean set. Our baseline and Slack 2-pass use only utterances with duration $\geq 10$ s, so the primary controlled comparison is between those two rows. Relative WER reduction is measured against Baseline (ours).",
+            r"\footnotesize \textit{Note:} All rows use the standard LibriSpeech test-clean split. The official 1.40\% WER is shown as a reference. The controlled comparison is Baseline (ours) versus Slack 2-pass (ours), which share the same inference implementation. Relative WER reduction is measured against Baseline (ours).",
             r"\end{minipage}",
             r"\end{table}",
             "",
