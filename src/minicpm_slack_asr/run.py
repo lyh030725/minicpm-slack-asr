@@ -296,7 +296,7 @@ def _counts_from_row(row: dict[str, Any]) -> WERCounts:
 
 def _build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {
-        "selection": "LibriSpeech ASR test-clean, duration strictly > 10 seconds, no sample limit by default",
+        "selection": "LibriSpeech ASR test-clean, duration >= 10 seconds, no sample limit by default",
         "conditions": {},
     }
     condition_counts: dict[str, WERCounts] = {}
@@ -333,11 +333,11 @@ def parse_args() -> argparse.Namespace:
         description="Training-free two-pass ASR using MiniCPM-o 4.5 LLM listening slack."
     )
     parser.add_argument("--dataset-root", type=Path, default=Path("data/LibriSpeech/test-clean"))
-    parser.add_argument("--min-duration", type=float, default=10.0, help="Strict lower bound; default selects >10 s.")
+    parser.add_argument("--min-duration", type=float, default=10.0, help="Inclusive lower bound; default selects >=10 s.")
     parser.add_argument("--max-samples", type=int, default=0, help="0 means every qualifying sample.")
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/test-clean-gt10"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/test-clean-ge10"))
     parser.add_argument(
         "--conditions",
         nargs="+",
@@ -373,12 +373,12 @@ def main() -> None:
     )
     if not samples:
         raise SystemExit(
-            f"No LibriSpeech FLAC files with duration > {args.min_duration}s under {args.dataset_root}. "
+            f"No LibriSpeech FLAC files with duration >= {args.min_duration}s under {args.dataset_root}. "
             "Run scripts/download_librispeech.sh first."
         )
     write_manifest(samples, args.output_dir / "manifest.csv")
 
-    print(f"[data] selected={len(samples)} test-clean utterances with duration>{args.min_duration}s")
+    print(f"[data] selected={len(samples)} test-clean utterances with duration>={args.min_duration}s")
     print(f"[data] max_samples={args.max_samples} (0 means all)")
     print(f"[run] conditions={args.conditions} realtime={args.realtime}")
     print("[model] speech decoding disabled: init_tts=False, LLM text tokens only")
@@ -424,7 +424,7 @@ def main() -> None:
         if chunk_mode == "w":
             chunk_writer.writeheader()
 
-        for sample in tqdm(samples, desc="LibriSpeech >10s"):
+        for sample in tqdm(samples, desc="LibriSpeech >=10s"):
             for condition in args.conditions:
                 key = (sample.sample_id, condition)
                 if key in completed:
