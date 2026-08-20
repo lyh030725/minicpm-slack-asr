@@ -6,8 +6,8 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 unset PYTORCH_CUDA_ALLOC_CONF || true
 
-# Fresh directory for the full standard LibriSpeech test-clean split.
-OUTPUT_DIR="results/test-clean-all-nonthinking"
+# Fresh directory so all rows use the same decoder-level thinking-token mask.
+OUTPUT_DIR="results/test-clean-all-hardmask"
 
 python -m minicpm_slack_asr.run \
   --dataset-root data/LibriSpeech/test-clean \
