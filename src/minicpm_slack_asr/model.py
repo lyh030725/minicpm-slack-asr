@@ -19,8 +19,7 @@ SYSTEM_PROMPT = (
 STREAMING_ASR_PROMPT = "Please listen to the audio snippet carefully and transcribe the content."
 
 # Baseline already has the ASR instruction before the streamed audio, so no extra
-# text is appended at utterance end. This is the closest path to normal generation
-# from the accumulated full-audio KV cache.
+# text is appended at utterance end. Slack adds only a short draft-correction hint.
 BASELINE_FINAL_PROMPT = ""
 SLACK_FINAL_PROMPT_TEMPLATE = (
     "\nTentative transcript (it may contain recognition errors or omissions):\n{draft}\n"
@@ -68,8 +67,17 @@ def build_final_prompt(draft_text: str | None) -> str:
     return SLACK_FINAL_PROMPT_TEMPLATE.format(draft=draft)
 
 
-def build_non_thinking_assistant_prefix(model: Any) -> str:
-    """Match MiniCPM-o 4.5's streaming_generate non-thinking BOS prefix."""
+def build_non_thinking_assistant_prefix(model: Any, *, use_tts_template: bool = False) -> str:
+    """Match MiniCPM-o 4.5's streaming_generate assistant BOS prefix exactly.
+
+    Upstream builds:
+      <|im_end|>\n<|im_start|>assistant\n
+      + empty closed Qwen3 think block when enable_thinking=False
+      + <|tts_bos|> when use_tts_template=True
+
+    ``use_tts_template=True`` only changes the LLM-side response-mode prefix here;
+    this project still loads with init_tts=False and never requests audio generation.
+    """
     think_str = getattr(model, "think_str", None)
     if not isinstance(think_str, str) or not think_str:
         raise RuntimeError(
@@ -83,6 +91,8 @@ def build_non_thinking_assistant_prefix(model: Any) -> str:
             "Unexpected MiniCPM-o think_str. Refusing to run because non-thinking decoding "
             f"cannot be verified: {think_str!r}"
         )
+    if use_tts_template:
+        prefix += "<|tts_bos|>"
     return prefix
 
 
@@ -143,9 +153,10 @@ class DraftStepResult:
 class MiniCPMSlackASR:
     """Audio-in / LLM-text-out runner for MiniCPM-o 4.5.
 
-    TTS is not initialized. All generation calls the Qwen3 LLM backbone directly.
-    Intermediate draft decoding temporarily extends the LLM KV cache and rolls it
-    back to the exact post-audio-prefill length before the next audio chunk.
+    TTS is not initialized. Slack drafts use direct Qwen3 LLM decoding with the exact
+    non-thinking + <|tts_bos|> prefix used by MiniCPM-o's TTS-template text mode, then
+    roll the speculative KV branch back. Final ASR uses upstream streaming_generate
+    with generate_audio=False and use_tts_template=True, so no speech decoding occurs.
     """
 
     def __init__(self, config: ModelConfig):
@@ -168,7 +179,7 @@ class MiniCPMSlackASR:
         self.tokenizer = self.model.processor.tokenizer
         self.device = self.model.llm.device
 
-        required = ["streaming_prefill", "_get_kv_cache_length", "_truncate_llm_cache"]
+        required = ["streaming_prefill", "streaming_generate", "_get_kv_cache_length", "_truncate_llm_cache"]
         missing = [name for name in required if not hasattr(self.model, name)]
         if missing:
             raise RuntimeError(
@@ -176,12 +187,27 @@ class MiniCPMSlackASR:
                 f"required by this experiment: {missing}. Pin a compatible model revision."
             )
 
-        self._assistant_prefix_text = build_non_thinking_assistant_prefix(self.model)
+        # The TTS-template token is an LLM response-mode marker even when no waveform is
+        # requested. The controlled A/B sanity run showed that omitting it drives the
+        # model toward metadata/control-text outputs. Use the exact upstream prefix for
+        # both speculative slack drafts and final text-only ASR.
+        self._assistant_prefix_text = build_non_thinking_assistant_prefix(
+            self.model,
+            use_tts_template=True,
+        )
         self._assistant_prefix_ids = self.tokenizer.encode(
             self._assistant_prefix_text,
             add_special_tokens=False,
         )
         self._thinking_token_ids = resolve_thinking_token_ids(self.tokenizer)
+        self._tts_bos_token_id = self.tokenizer.convert_tokens_to_ids("<|tts_bos|>")
+        if self._tts_bos_token_id is None or int(self._tts_bos_token_id) < 0:
+            raise RuntimeError("MiniCPM-o tokenizer does not expose <|tts_bos|>.")
+        self._tts_bos_token_id = int(self._tts_bos_token_id)
+        if not self._assistant_prefix_ids or self._assistant_prefix_ids[-1] != self._tts_bos_token_id:
+            raise RuntimeError(
+                "TTS-template assistant prefix does not end in <|tts_bos|>; pin a compatible MiniCPM-o revision."
+            )
 
         # Match upstream streaming text-generation terminators exactly.
         self._terminator_ids = {
@@ -194,6 +220,7 @@ class MiniCPMSlackASR:
 
         # Text-only ASR should never emit modality/chat-control special tokens. Keep
         # terminators separate so they can still end decoding after a real text token.
+        # <|tts_bos|> is intentionally present only in the input prefix, never generated.
         all_special_ids = {int(tid) for tid in getattr(self.tokenizer, "all_special_ids", [])}
         self._special_control_token_ids = all_special_ids - self._terminator_ids
 
@@ -309,10 +336,6 @@ class MiniCPMSlackASR:
         if forbidden_ids:
             masked_logits[..., forbidden_ids] = float("-inf")
 
-        # LibriSpeech utterances are non-empty. For final decoding only, min_new_tokens=1
-        # prevents a masked <think> from simply exposing <|im_end|> as the new argmax and
-        # producing final=''. Slack decoding keeps min_new_tokens=0 and may legitimately
-        # choose to produce no tentative text in a short slack window.
         if generated_count < min_new_tokens:
             terminator_ids = sorted(tid for tid in self._terminator_ids if 0 <= tid < vocab_size)
             if terminator_ids:
@@ -431,9 +454,8 @@ class MiniCPMSlackASR:
                     "masked_topk": self._topk_snapshot(masked_logits, k=self.config.diagnostic_top_k),
                 }
 
-            # For tentative slack work, do not force a transcript when the model's raw
-            # preference is to stop or re-enter thinking. Simply spend zero additional
-            # draft tokens and rollback the temporary branch.
+            # Slack work is optional. If the model's unmasked preference is to stop or
+            # re-enter thinking, do not force a replacement token; emit no new draft text.
             if stop_on_raw_draft_control and raw_argmax_id in self._draft_raw_stop_token_ids:
                 if first_selection and capture_first_token_diagnostics:
                     diagnostics["stopped_on_raw_control"] = True
@@ -509,6 +531,8 @@ class MiniCPMSlackASR:
             )
 
         draft_tail = draft_token_ids[-self.config.max_draft_prefix_tokens :]
+        # This prefix now exactly matches upstream streaming_generate with
+        # enable_thinking=False and use_tts_template=True, including <|tts_bos|>.
         prefix_ids = [*self._assistant_prefix_ids, *draft_tail]
         try:
             new_ids, prefix_ms, decode_ms, _ = self._decode_with_prefix(
@@ -542,35 +566,28 @@ class MiniCPMSlackASR:
             cache_len_after_restore=cache_len_after,
         )
 
-    def finalize(self, *, draft_text: str | None) -> tuple[str, float, float]:
+    def _finalize_custom_tts_prefix(self, *, draft_text: str | None) -> tuple[str, float, float]:
+        """Diagnostic custom finalizer using the same <|tts_bos|> prefix as upstream."""
         final_prompt = build_final_prompt(draft_text)
         final_prompt_ms = self._prefill_raw_text(final_prompt) if final_prompt else 0.0
         generated_ids, prefix_ms, decode_ms, diagnostics = self._decode_with_prefix(
             self._assistant_prefix_ids,
             max_new_tokens=self.config.max_final_tokens,
             deadline_s=None,
-            min_new_tokens=1,
+            min_new_tokens=0,
             stop_on_raw_draft_control=False,
             capture_first_token_diagnostics=True,
         )
         self._last_final_diagnostics = diagnostics
-        text = self._decode_text_checked(generated_ids, phase="final ASR").strip()
-        if not text:
-            raise RuntimeError(
-                "Final ASR decoded to an empty transcript after min_new_tokens=1. "
-                f"First-token diagnostics: {diagnostics}"
-            )
+        text = self._decode_text_checked(generated_ids, phase="custom final ASR").strip()
         return text, final_prompt_ms + prefix_ms, decode_ms
 
     def finalize_official_text_only(self, *, draft_text: str | None) -> tuple[str, float, float]:
-        """Finalize through MiniCPM-o's upstream streaming_generate text-only path.
+        """Finalize through MiniCPM-o's upstream TTS-template text-only generation path.
 
-        The accumulated audio KV and optional draft-correction prompt are unchanged.
-        Only the decoder implementation differs from ``finalize``: MiniCPM-o builds
-        its own non-thinking assistant prefix and runs ChunkPrefillChunkGenerate with
-        ``generate_audio=False``. No TTS/audio decoding is initialized or invoked.
-        ``do_sample=False`` keeps this A/B comparison deterministic and closest to the
-        custom greedy decoder.
+        ``use_tts_template=True`` supplies the model's required <|tts_bos|> LLM prefix,
+        while ``generate_audio=False`` guarantees that no TTS waveform/audio decoding is
+        requested. ``init_tts=False`` also means the TTS module is not initialized.
         """
         if self.session_id is None:
             raise RuntimeError("reset_for_sample() must be called first.")
@@ -585,7 +602,7 @@ class MiniCPMSlackASR:
             generate_audio=False,
             max_new_tokens=self.config.max_final_tokens,
             enable_thinking=False,
-            use_tts_template=False,
+            use_tts_template=True,
             do_sample=False,
         )
         for item in iterator:
@@ -598,8 +615,25 @@ class MiniCPMSlackASR:
         decode_ms = (time.perf_counter() - start) * 1000.0
         return "".join(pieces).strip(), final_prompt_ms, decode_ms
 
+    def finalize(self, *, draft_text: str | None) -> tuple[str, float, float]:
+        """Primary final ASR path: MiniCPM-o upstream text-only generation with <|tts_bos|>."""
+        text, final_prompt_ms, decode_ms = self.finalize_official_text_only(draft_text=draft_text)
+        self._last_final_diagnostics = {
+            "decoder": "MiniCPM-o streaming_generate",
+            "generate_audio": False,
+            "use_tts_template": True,
+            "enable_thinking": False,
+            "do_sample": False,
+            "assistant_prefix_ends_tts_bos": True,
+        }
+        if not text:
+            raise RuntimeError(
+                "Final ASR returned an empty transcript from MiniCPM-o text-only TTS-template generation."
+            )
+        return text, final_prompt_ms, decode_ms
+
     def compare_finalizers(self, *, draft_text: str | None) -> dict[str, Any]:
-        """Run custom and upstream text-only finalizers from the exact same pre-final state."""
+        """Compare custom and upstream decoders from the exact same <|tts_bos|>-conditioned state."""
         required = ["save_speculative_snapshot", "restore_speculative_snapshot", "streaming_generate"]
         missing = [name for name in required if not hasattr(self.model, name)]
         if missing:
@@ -616,7 +650,7 @@ class MiniCPMSlackASR:
             "error": None,
         }
         try:
-            text, prompt_prefix_ms, decode_ms = self.finalize(draft_text=draft_text)
+            text, prompt_prefix_ms, decode_ms = self._finalize_custom_tts_prefix(draft_text=draft_text)
             custom.update(
                 {
                     "text": text,
@@ -661,6 +695,7 @@ class MiniCPMSlackASR:
             "pre_final_cache_len": pre_final_cache_len,
             "restored_cache_len": restored_cache_len,
             "same_pre_final_state": pre_final_cache_len == restored_cache_len,
+            "assistant_prefix_mode": "non-thinking + <|tts_bos|>",
             "custom": custom,
             "official_text_only": official,
         }
@@ -681,22 +716,23 @@ class MiniCPMSlackASR:
             "init_vision": False,
             "init_audio": True,
             "init_tts": False,
-            "decode": "greedy argmax on model.llm only",
+            "slack_decode": "custom greedy model.llm branch with exact TTS-template assistant prefix",
+            "final_decode": "MiniCPM-o streaming_generate text-only, greedy",
+            "generate_audio": False,
             "enable_thinking": False,
+            "use_tts_template": True,
             "assistant_generation_prefix": self._assistant_prefix_text.replace("\n", "\\n"),
-            "assistant_prefix_source": "matches upstream streaming_generate(enable_thinking=False, use_tts_template=False)",
+            "assistant_prefix_source": (
+                "matches upstream streaming_generate(enable_thinking=False, use_tts_template=True)"
+            ),
+            "tts_bos_token_id": self._tts_bos_token_id,
             "thinking_token_mask": dict(self._thinking_token_ids),
             "official_bad_token_suppression_count": len(self._official_forbidden_token_ids),
             "special_control_token_suppression_count": len(self._special_control_token_ids),
             "terminator_ids": sorted(self._terminator_ids),
             "terminators": ["<|tts_eos|>", "<|im_end|>", "</s>"],
-            "final_min_new_tokens": 1,
             "draft_raw_think_or_eos_policy": "stop draft without forcing another token",
             "final_prompt_prefill": "baseline: none; slack: short direct model.llm draft-correction hint",
-            "diagnostic_official_finalizer": (
-                "streaming_generate(generate_audio=False, use_tts_template=False, "
-                "enable_thinking=False, do_sample=False)"
-            ),
             "system_prompt": SYSTEM_PROMPT,
             "streaming_asr_prompt": STREAMING_ASR_PROMPT,
             "baseline_final_prompt": BASELINE_FINAL_PROMPT,
