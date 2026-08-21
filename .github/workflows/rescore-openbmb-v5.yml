@@ -1,0 +1,211 @@
+name: Rescore v5 with OpenBMB WER
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/rescore-openbmb-v5.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rescore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out v5 result branch
+        uses: actions/checkout@v4
+        with:
+          ref: results/test-clean-all-tts-prefix-v5
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check out pinned OpenBMB UltraEval-Audio
+        uses: actions/checkout@v4
+        with:
+          repository: OpenBMB/UltraEval-Audio
+          ref: bbc07b1effc03a85006c36dc765b8f2b8eae8d36
+          path: ultraeval
+          persist-credentials: false
+
+      - name: Install scorer dependencies
+        run: python -m pip install --upgrade pip 'sacrebleu==2.5.1' 'more-itertools>=10' 'editdistance>=0.8'
+
+      - name: Re-score existing v5 transcripts
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import json
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          import editdistance
+
+          ROOT = Path.cwd()
+          RESULT_DIR = ROOT / 'results' / 'test-clean-all-tts-prefix-v5'
+          SAMPLES = RESULT_DIR / 'samples.csv'
+          OLD_SUMMARY = RESULT_DIR / 'summary.json'
+          ULTRAEVAL = ROOT / 'ultraeval'
+          sys.path.insert(0, str(ULTRAEVAL))
+
+          from audio_evals.lib.evaluate_tokenizer import EvaluationTokenizer
+          from audio_evals.lib.text_normalization.en import EnglishTextNormalizer
+
+          OPENBMB_COMMIT = 'bbc07b1effc03a85006c36dc765b8f2b8eae8d36'
+          normalizer = EnglishTextNormalizer()
+          tokenizer = EvaluationTokenizer(
+              tokenizer_type='13a',
+              lowercase=True,
+              punctuation_removal=False,
+              character_tokenization=False,
+          )
+
+          def openbmb_tokens(text: str) -> list[str]:
+              # UltraEval-Audio PracticeWER lowercases pred/ref before compute_wer;
+              # compute_wer then applies EnglishTextNormalizer and EvaluationTokenizer.
+              text = normalizer(str(text).lower())
+              return tokenizer.tokenize(text).split()
+
+          def counts(ref: list[str], hyp: list[str]):
+              # Same minimum edit distance as OpenBMB/editdistance, with S/D/I exposed
+              # only for diagnostics. WER itself is distance / normalized ref tokens.
+              n, m = len(ref), len(hyp)
+              dp = [[None] * (m + 1) for _ in range(n + 1)]
+              dp[0][0] = (0, 0, 0, 0)  # errors, sub, del, ins
+              for i in range(1, n + 1):
+                  dp[i][0] = (i, 0, i, 0)
+              for j in range(1, m + 1):
+                  dp[0][j] = (j, 0, 0, j)
+              for i in range(1, n + 1):
+                  for j in range(1, m + 1):
+                      if ref[i - 1] == hyp[j - 1]:
+                          dp[i][j] = dp[i - 1][j - 1]
+                      else:
+                          a = dp[i - 1][j - 1]
+                          b = dp[i - 1][j]
+                          c = dp[i][j - 1]
+                          cand = [
+                              (a[0] + 1, a[1] + 1, a[2], a[3]),
+                              (b[0] + 1, b[1], b[2] + 1, b[3]),
+                              (c[0] + 1, c[1], c[2], c[3] + 1),
+                          ]
+                          dp[i][j] = min(cand, key=lambda x: (x[0], x[1], x[2], x[3]))
+              return dp[n][m]
+
+          with SAMPLES.open(newline='', encoding='utf-8') as f:
+              rows = list(csv.DictReader(f))
+          if not rows:
+              raise RuntimeError(f'No rows found in {SAMPLES}')
+
+          required = {'condition', 'reference', 'final'}
+          missing = required - set(rows[0])
+          if missing:
+              raise RuntimeError(f'Missing required columns: {sorted(missing)}; got {list(rows[0])}')
+
+          agg = defaultdict(lambda: {'samples': 0, 'distance': 0, 'reference_words': 0,
+                                     'substitutions': 0, 'deletions': 0, 'insertions': 0})
+          rescored_rows = []
+
+          for row in rows:
+              cond = row['condition']
+              ref = openbmb_tokens(row['reference'])
+              hyp = openbmb_tokens(row['final'])
+              official_distance = int(editdistance.eval(ref, hyp))
+              total, sub, dele, ins = counts(ref, hyp)
+              if total != official_distance:
+                  raise RuntimeError(f'Internal edit-distance mismatch for {row.get("sample_id")}: {total} != {official_distance}')
+              a = agg[cond]
+              a['samples'] += 1
+              a['distance'] += official_distance
+              a['reference_words'] += len(ref)
+              a['substitutions'] += sub
+              a['deletions'] += dele
+              a['insertions'] += ins
+
+              out = dict(row)
+              out['openbmb_wer'] = (official_distance / len(ref)) if ref else (0.0 if not hyp else float('inf'))
+              out['openbmb_substitutions'] = sub
+              out['openbmb_deletions'] = dele
+              out['openbmb_insertions'] = ins
+              out['openbmb_reference_words'] = len(ref)
+              rescored_rows.append(out)
+
+          conditions = {}
+          for cond, a in agg.items():
+              a = dict(a)
+              a['micro_wer'] = a['distance'] / a['reference_words']
+              conditions[cond] = a
+
+          baseline = conditions['baseline']['micro_wer']
+          slack = conditions['slack_2pass']['micro_wer']
+          relative = (baseline - slack) / baseline * 100.0 if baseline else None
+
+          old = json.loads(OLD_SUMMARY.read_text(encoding='utf-8')) if OLD_SUMMARY.exists() else {}
+          summary = {
+              'scorer': {
+                  'name': 'OpenBMB UltraEval-Audio English ASR WER reproduction',
+                  'repository': 'OpenBMB/UltraEval-Audio',
+                  'commit': OPENBMB_COMMIT,
+                  'pipeline': 'PracticeWER -> EnglishTextNormalizer -> EvaluationTokenizer(13a, lowercase=True) -> corpus edit distance',
+                  'note': 'This reproduces the public OpenBMB UltraEval-Audio WER implementation pinned above; it does not assert that the MiniCPM-o 4.5 model-card 1.40 WER used this exact commit.',
+              },
+              'selection': 'LibriSpeech ASR test-clean, complete standard split',
+              'conditions': conditions,
+              'relative_wer_reduction_pct': relative,
+              'absolute_wer_change': slack - baseline,
+              'old_custom_summary': old,
+          }
+          (RESULT_DIR / 'summary_openbmb.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+
+          fieldnames = list(rescored_rows[0].keys())
+          with (RESULT_DIR / 'samples_openbmb.csv').open('w', newline='', encoding='utf-8') as f:
+              w = csv.DictWriter(f, fieldnames=fieldnames)
+              w.writeheader()
+              w.writerows(rescored_rows)
+
+          md = [
+              '# ASR Results Re-scored with OpenBMB UltraEval-Audio WER',
+              '',
+              f'Pinned scorer: `OpenBMB/UltraEval-Audio@{OPENBMB_COMMIT}`',
+              '',
+              '| Method | Samples | WER (%) ↓ | S | D | I | Total edit distance | Rel. WER Reduction (%) ↑ |',
+              '|---|---:|---:|---:|---:|---:|---:|---:|',
+          ]
+          for cond, label in [('baseline', 'Baseline (ours)'), ('slack_2pass', 'Slack 2-pass (ours)')]:
+              a = conditions[cond]
+              rel = '—' if cond == 'baseline' else f'{relative:.2f}'
+              md.append(f"| {label} | {a['samples']} | {a['micro_wer']*100:.3f} | {a['substitutions']} | {a['deletions']} | {a['insertions']} | {a['distance']} | {rel} |")
+          md += [
+              '',
+              '**Scoring pipeline.** OpenBMB UltraEval-Audio `PracticeWER`: lowercase → `EnglishTextNormalizer` → `EvaluationTokenizer(13a, lowercase=True, punctuation_removal=False, character_tokenization=False)` → corpus edit distance / normalized reference-token count.',
+              '',
+              '**Caveat.** This is an exact reproduction of the pinned public UltraEval-Audio English WER implementation, not a claim that MiniCPM-o 4.5 model-card WER 1.40 used this exact scorer commit.',
+              '',
+          ]
+          (RESULT_DIR / 'paper_table_openbmb.md').write_text('\n'.join(md), encoding='utf-8')
+
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Commit re-scored outputs to result branch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            results/test-clean-all-tts-prefix-v5/summary_openbmb.json \
+            results/test-clean-all-tts-prefix-v5/samples_openbmb.csv \
+            results/test-clean-all-tts-prefix-v5/paper_table_openbmb.md
+          if git diff --cached --quiet; then
+            echo 'No rescoring changes to commit.'
+          else
+            git commit -m 'Rescore v5 with pinned OpenBMB WER'
+            git push origin HEAD:results/test-clean-all-tts-prefix-v5
+          fi
