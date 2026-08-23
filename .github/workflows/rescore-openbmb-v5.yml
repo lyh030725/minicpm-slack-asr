@@ -26,14 +26,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Fetch pinned OpenBMB UltraEval-Audio without submodules
+      - name: Fetch pinned OpenBMB UltraEval-Audio archive
         shell: bash
         run: |
-          rm -rf ultraeval
-          git init ultraeval
-          git -C ultraeval remote add origin https://github.com/OpenBMB/UltraEval-Audio.git
-          git -C ultraeval fetch --depth 1 origin bbc07b1effc03a85006c36dc765b8f2b8eae8d36
-          git -C ultraeval checkout --detach FETCH_HEAD
+          set -euo pipefail
+          rm -rf ultraeval ultraeval.tar.gz
+          mkdir -p ultraeval
+          curl --fail --location --retry 3 \
+            "https://github.com/OpenBMB/UltraEval-Audio/archive/bbc07b1effc03a85006c36dc765b8f2b8eae8d36.tar.gz" \
+            --output ultraeval.tar.gz
+          tar -xzf ultraeval.tar.gz -C ultraeval --strip-components=1
+          test -f ultraeval/audio_evals/lib/evaluate_tokenizer.py
+          test -f ultraeval/audio_evals/lib/text_normalization/en.py
 
       - name: Install scorer dependencies
         # UltraEval-Audio at the pinned commit requires sacrebleu==1.5.1.
