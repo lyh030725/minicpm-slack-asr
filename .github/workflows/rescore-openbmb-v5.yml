@@ -214,8 +214,7 @@ jobs:
           print(json.dumps(summary, indent=2))
           PY
 
-      # Always preserve the generated files as an Actions artifact first.
-      # This makes the result recoverable even if a later git push fails.
+      # Preserve the generated files as an Actions artifact before any git writes.
       - name: Upload re-scored outputs artifact
         uses: actions/upload-artifact@v4
         with:
@@ -233,8 +232,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-          # The repository intentionally ignores results/, but this result branch
-          # already tracks experiment outputs. Force-add only these three generated files.
           git add -f -- \
             results/test-clean-all-tts-prefix-v5/summary_openbmb.json \
             results/test-clean-all-tts-prefix-v5/samples_openbmb.csv \
@@ -242,8 +239,42 @@ jobs:
 
           git status --short
           if git diff --cached --quiet; then
-            echo 'No rescoring changes to commit.'
+            echo 'No rescoring changes to commit on result branch.'
           else
             git commit -m 'Rescore v5 with pinned OpenBMB WER'
             git push origin HEAD:results/test-clean-all-tts-prefix-v5
+          fi
+
+      - name: Sync re-scored outputs into main results
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TMP_DIR="$(mktemp -d)"
+          cp results/test-clean-all-tts-prefix-v5/summary_openbmb.json "$TMP_DIR/"
+          cp results/test-clean-all-tts-prefix-v5/samples_openbmb.csv "$TMP_DIR/"
+          cp results/test-clean-all-tts-prefix-v5/paper_table_openbmb.md "$TMP_DIR/"
+
+          git fetch origin main
+          git checkout -B openbmb-main-sync origin/main
+
+          DEST="results/test-clean-all-tts-prefix-v5"
+          mkdir -p "$DEST"
+          cp "$TMP_DIR/summary_openbmb.json" "$DEST/"
+          cp "$TMP_DIR/samples_openbmb.csv" "$DEST/"
+          cp "$TMP_DIR/paper_table_openbmb.md" "$DEST/"
+
+          # results/ is intentionally ignored globally, so explicitly track only
+          # these reproducible rescoring outputs on main.
+          git add -f -- \
+            "$DEST/summary_openbmb.json" \
+            "$DEST/samples_openbmb.csv" \
+            "$DEST/paper_table_openbmb.md"
+
+          git status --short
+          if git diff --cached --quiet; then
+            echo 'Main already contains the current OpenBMB rescoring outputs.'
+          else
+            git commit -m 'Sync OpenBMB v5 rescoring outputs to main results'
+            git push origin HEAD:main
           fi
