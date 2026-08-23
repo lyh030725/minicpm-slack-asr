@@ -26,13 +26,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Check out pinned OpenBMB UltraEval-Audio
-        uses: actions/checkout@v4
-        with:
-          repository: OpenBMB/UltraEval-Audio
-          ref: bbc07b1effc03a85006c36dc765b8f2b8eae8d36
-          path: ultraeval
-          persist-credentials: false
+      - name: Fetch pinned OpenBMB UltraEval-Audio without submodules
+        shell: bash
+        run: |
+          rm -rf ultraeval
+          git init ultraeval
+          git -C ultraeval remote add origin https://github.com/OpenBMB/UltraEval-Audio.git
+          git -C ultraeval fetch --depth 1 origin bbc07b1effc03a85006c36dc765b8f2b8eae8d36
+          git -C ultraeval checkout --detach FETCH_HEAD
 
       - name: Install scorer dependencies
         # UltraEval-Audio at the pinned commit requires sacrebleu==1.5.1.
