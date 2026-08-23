@@ -40,10 +40,10 @@ jobs:
           test -f ultraeval/audio_evals/lib/text_normalization/en.py
 
       - name: Install scorer dependencies
-        # UltraEval-Audio at the pinned commit requires sacrebleu==1.5.1.
-        # Newer sacrebleu versions removed TOKENIZERS from sacrebleu.tokenizers,
-        # which makes UltraEval-Audio's EvaluationTokenizer import fail.
-        run: python -m pip install --upgrade pip 'sacrebleu==1.5.1' 'more-itertools>=10' 'editdistance>=0.8'
+        # Minimal dependency set required by the pinned OpenBMB ASR WER code path.
+        # sacrebleu must stay at 1.5.1 because UltraEval imports TOKENIZERS from it.
+        # regex is imported by audio_evals/lib/text_normalization/basic.py.
+        run: python -m pip install --upgrade pip 'sacrebleu==1.5.1' 'more-itertools>=10' 'editdistance>=0.8' 'regex'
 
       - name: Re-score existing v5 transcripts
         shell: bash
