@@ -214,15 +214,33 @@ jobs:
           print(json.dumps(summary, indent=2))
           PY
 
+      # Always preserve the generated files as an Actions artifact first.
+      # This makes the result recoverable even if a later git push fails.
+      - name: Upload re-scored outputs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openbmb-v5-rescore
+          path: |
+            results/test-clean-all-tts-prefix-v5/summary_openbmb.json
+            results/test-clean-all-tts-prefix-v5/samples_openbmb.csv
+            results/test-clean-all-tts-prefix-v5/paper_table_openbmb.md
+          if-no-files-found: error
+
       - name: Commit re-scored outputs to result branch
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
+
+          # The repository intentionally ignores results/, but this result branch
+          # already tracks experiment outputs. Force-add only these three generated files.
+          git add -f -- \
             results/test-clean-all-tts-prefix-v5/summary_openbmb.json \
             results/test-clean-all-tts-prefix-v5/samples_openbmb.csv \
             results/test-clean-all-tts-prefix-v5/paper_table_openbmb.md
+
+          git status --short
           if git diff --cached --quiet; then
             echo 'No rescoring changes to commit.'
           else
