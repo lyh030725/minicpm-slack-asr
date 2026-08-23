@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
-import unicodedata
+from functools import lru_cache
+from typing import Any
+
+
+OPENBMB_ULTRAEVAL_COMMIT = "bbc07b1effc03a85006c36dc765b8f2b8eae8d36"
 
 
 @dataclass(frozen=True)
@@ -23,20 +26,55 @@ class WERCounts:
         return self.errors / self.reference_words
 
 
-def normalize_for_wer(text: str) -> str:
-    """Light LibriSpeech-style normalization for model-output WER.
+@lru_cache(maxsize=1)
+def _openbmb_normalizers() -> tuple[Any, Any]:
+    """Load the pinned OpenBMB UltraEval-Audio English ASR scorer components.
 
-    LibriSpeech references are uppercase and mostly punctuation free. We lowercase,
-    Unicode-normalize, keep apostrophes inside words, replace other punctuation with
-    spaces, and collapse whitespace.
+    The source package itself is installed by ``scripts/setup_runpod.sh`` from
+    ``OpenBMB/UltraEval-Audio`` at ``OPENBMB_ULTRAEVAL_COMMIT`` with ``--no-deps``.
+    Its small runtime dependencies are pinned in ``requirements.txt``.
     """
-    text = unicodedata.normalize("NFKC", text).lower()
-    text = re.sub(r"[^a-z0-9']+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    try:
+        from audio_evals.lib.evaluate_tokenizer import EvaluationTokenizer
+        from audio_evals.lib.text_normalization.en import EnglishTextNormalizer
+    except ImportError as exc:  # pragma: no cover - setup error path
+        raise RuntimeError(
+            "OpenBMB UltraEval-Audio scorer is not installed. Run "
+            "`bash scripts/setup_runpod.sh` or install the pinned scorer source "
+            f"at commit {OPENBMB_ULTRAEVAL_COMMIT}."
+        ) from exc
+
+    normalizer = EnglishTextNormalizer()
+    tokenizer = EvaluationTokenizer(
+        tokenizer_type="13a",
+        lowercase=True,
+        punctuation_removal=False,
+        character_tokenization=False,
+    )
+    return normalizer, tokenizer
+
+
+def normalize_for_wer(text: str) -> str:
+    """Normalize/tokenize exactly like OpenBMB UltraEval-Audio ``PracticeWER``.
+
+    Pipeline pinned for this project:
+      lowercase -> EnglishTextNormalizer -> sacreBLEU 13a EvaluationTokenizer
+
+    The returned string is already whitespace-tokenized for WER scoring.
+    """
+    normalizer, tokenizer = _openbmb_normalizers()
+    normalized = normalizer(str(text).lower())
+    return tokenizer.tokenize(normalized).strip()
 
 
 def compute_wer(reference: str, hypothesis: str) -> WERCounts:
+    """Compute word error counts using the OpenBMB-normalized token sequences.
+
+    OpenBMB UltraEval-Audio computes corpus WER from edit distance after its
+    English normalization and 13a tokenization. We use the same token sequences
+    and a Levenshtein DP that additionally exposes S/D/I counts. The sum of
+    S+D+I is the same minimum edit distance used for WER.
+    """
     ref = normalize_for_wer(reference).split()
     hyp = normalize_for_wer(hypothesis).split()
 
