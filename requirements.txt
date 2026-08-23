@@ -8,4 +8,13 @@ numpy>=2.2.0,<3
 scipy>=1.13
 soundfile>=0.12.1
 tqdm>=4.67
+
+# OpenBMB UltraEval-Audio English ASR WER reproduction.
+# UltraEval-Audio@bbc07b1 imports TOKENIZERS from sacrebleu.tokenizers,
+# which requires the 1.x API used by the pinned scorer source.
+sacrebleu==1.5.1
+more-itertools>=10
+editdistance>=0.8
+regex>=2024.0.0
+
 pytest>=9.0
