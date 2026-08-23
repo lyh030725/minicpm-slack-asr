@@ -1,8 +1,21 @@
 from minicpm_slack_asr.wer import aggregate_counts, compute_wer, normalize_for_wer
 
 
-def test_normalize_for_wer():
-    assert normalize_for_wer("Hello, WORLD! Don't stop.") == "hello world don't stop"
+def test_normalize_for_wer_openbmb_contraction():
+    assert normalize_for_wer("Hello, WORLD! Don't stop.") == "hello world do not stop"
+
+
+def test_openbmb_number_normalization():
+    assert normalize_for_wer("twenty") == normalize_for_wer("20")
+    assert compute_wer("TWENTY", "20").errors == 0
+
+
+def test_openbmb_spelling_normalization():
+    assert compute_wer("COLOUR", "color").errors == 0
+
+
+def test_openbmb_ignored_fillers():
+    assert compute_wer("HELLO", "uh hello").errors == 0
 
 
 def test_compute_wer_exact():
